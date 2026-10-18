@@ -5,14 +5,14 @@ import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
 import { replyCaptchaEvent } from "../core/captcha/notify.js"
 import {
   loadProfile,
-  parseProfileIdFromMessage,
+  listProfileIds,
   PROFILE_ID_SUFFIX_PATTERN,
 } from "../core/config/profile.js"
 import { renderStatusCard } from "../core/render/service.js"
 import { replyImage, replyText } from "../core/transport/reply.js"
 import { loadGlobalConfig } from "../core/config/global.js"
 import { PythonEnvService } from "../services/python/env.js"
-import { ProfileSigninService } from "../services/checkin/profileSignin.js"
+import { ProfileSigninService, renderSigninMulti } from "../services/checkin/profileSignin.js"
 import { TestNineEnvService } from "../services/testNine/env.js"
 import { ToolInstallerService } from "../services/tools/installer.js"
 
@@ -121,44 +121,80 @@ export class LotusCheckin extends BasePlugin {
 
   async runSignin() {
     const userId = String(this.e.user_id)
-    const profileId = parseProfileIdFromMessage(this.e.msg)
-    let profile
-    try {
-      profile = await loadProfile(userId, profileId)
-    } catch (error) {
-      if (error?.code === "ENOENT") {
-        await replyText(this, `profile ${profileId} 尚未配置，请先使用 #扫码登录${profileId === 1 ? "" : profileId}。`, { at: true })
-        return true
-      }
-      throw error
+    // 带编号（#签到2）→ 只跑该 profile；不带编号（#签到 / #全部签到）→ 该用户全部 profile
+    // 汇总到一张卡片返回（jj 对齐：多账号不拆卡）。
+    const explicitMatch = String(this.e.msg || "").trim().match(/(\d+)$/)
+    const targetIds = explicitMatch
+      ? [Number(explicitMatch[1])]
+      : await listProfileIds(userId).catch(() => [])
+
+    if (!targetIds.length) {
+      await replyText(this, "尚未配置账号，请先使用 #扫码登录。", { at: true })
+      return true
     }
 
-    if (!profile.account?.cookie) {
-      await replyText(this, `profile ${profileId} 尚未保存 cookie，请先扫码登录。`, { at: true })
+    // 逐个加载 profile；未配置 / 未登录的直接记为失败小节，不中断其它账号
+    const entries = []
+    for (const pid of targetIds) {
+      let profile = null
+      try {
+        profile = await loadProfile(userId, pid)
+      } catch (error) {
+        entries.push({
+          profileId: pid,
+          error: error?.code === "ENOENT" ? "尚未配置，请先使用 #扫码登录。" : `读取失败：${error.message}`,
+        })
+        continue
+      }
+      if (!profile.account?.cookie) {
+        entries.push({ profileId: pid, error: "尚未登录，请先使用 #扫码登录。" })
+        continue
+      }
+      entries.push({ profileId: pid, profile })
+    }
+
+    if (!entries.some(entry => entry.profile)) {
+      await replyText(this, entries[0].error || "没有可签到的账号。", { at: true })
       return true
     }
 
     // jj 短格式：单条 @ 等待提示，随后静默执行，仅出结果图
     await replyText(this, "签到中", { at: true })
 
+    // 多账号时跳过每个 profile 的单卡渲染（省一次无用的渲染，最终只出合并卡）
+    const multi = entries.filter(entry => entry.profile).length > 1
+
     try {
-      const outcome = await new ProfileSigninService().run({
-        qq: userId,
-        profileId,
-        profile,
-        installRequirements: false,
-        onCaptchaEvent: async event => {
-          await replyCaptchaEvent(this, event)
-        },
-      })
-      await replyImage(this, outcome.image, outcome.ok
+      let lastOk = false
+      let lastMessage = ""
+      for (const entry of entries) {
+        if (!entry.profile) continue
+        const outcome = await new ProfileSigninService({ render: !multi }).run({
+          qq: userId,
+          profileId: entry.profileId,
+          profile: entry.profile,
+          installRequirements: false,
+          onCaptchaEvent: async event => {
+            await replyCaptchaEvent(this, event)
+          },
+        })
+        entry.outcome = outcome
+        lastOk = Boolean(outcome.ok)
+        lastMessage = outcome.message || ""
+      }
+
+      const runnable = entries.filter(entry => entry.profile)
+      const image = multi
+        ? await renderSigninMulti({ userId, entries })
+        : runnable[0].outcome.image
+      await replyImage(this, image, lastOk
         ? `签到完成。`
-        : `签到失败：${outcome.message}`, { at: true })
+        : `签到失败：${lastMessage}`, { at: true })
     } catch (error) {
       logger?.error?.(`[Lotus-Plugin] checkin failed: ${error.stack || error.message}`)
       const image = await renderStatusCard({
         title: "签到失败",
-        subtitle: `${accountDisplay(String(userId))} · Profile ${profileId}`,
+        subtitle: `${accountDisplay(String(userId))}${explicitMatch ? ` · Profile ${explicitMatch[1]}` : ""}`,
         badge: "失败",
         message: error.message,
         userId,
@@ -167,7 +203,7 @@ export class LotusCheckin extends BasePlugin {
           { label: "建议", value: "先执行 #初始化签到环境，确认 profile 登录态和设备信息。" },
         ],
       }, {
-        saveId: `lotus-checkin-error-${userId}-${profileId}`,
+        saveId: `lotus-checkin-error-${userId}-${explicitMatch ? explicitMatch[1] : "multi"}`,
       })
       await replyImage(this, image, `签到失败：${error.message}`, { at: true })
     }

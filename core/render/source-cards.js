@@ -301,33 +301,58 @@ function checkin(p,data){
  bg(p);p.y=20
  const sub=[data.title,data.subtitle].filter(Boolean).join(' · ')
  darkHeader(p,'签到结果',sub,data.badge)
- const rows=Array.isArray(data.games)?data.games:[]
- if(rows.length){
-  const x=UI.SIDE,w=p.width-UI.SIDE*2,pad=UI.PAD
-  const c1=Math.round(w*0.36),c2=Math.round(w*0.32),c3=w-c1-c2
-  const rowH=46,headH=42
-  const h=headH+rows.length*rowH
-  openPanel(p,x,p.y,w,h,UI.R.panel,DARK.PANEL,2,'solid')
-  p.rect(x,p.y,w,headH,HEADER)
-  const hy=p.y+14
-  const headOpt={leading:UI.T.label[1],singleLine:true,minSize:10}
-  // 列头统一走「标签＝中性灰」规则（不再用强调蓝，避免蓝色泛滥）
-  p.text('游戏 / 社区',x+pad,hy,c1-pad-8,UI.T.label[0],DARK.LABEL,headOpt)
-  p.text('游戏签到',x+c1,hy,c2-8,UI.T.label[0],DARK.LABEL,headOpt)
-  p.text('社区签到',x+c1+c2,hy,c3-pad-8,UI.T.label[0],DARK.LABEL,headOpt)
-  let ry=p.y+headH
-  rows.forEach((r,i)=>{
-   if(i%2===1)p.rect(x,ry,w,rowH,DARK.STRIPE)
-   p.text(r.label||'-',x+pad,ry+15,c1-pad-8,UI.T.body[0],WHITE,{leading:UI.T.body[1],singleLine:true,minSize:11})
-   pill(p,r.game||'未执行',x+c1,ry+13,c2-16)
-   pill(p,r.community||'未执行',x+c1+c2,ry+13,c3-pad-8)
-   if(i<rows.length-1)p.rule(x+pad,ry+rowH-1,w-pad*2,DARK.LINE)
-   ry+=rowH
+ // 多账号模式（jj 对齐）：data.sections=[{label,badge,games,note}]，每个账号一张独立小节表；
+ // 单账号仍走 data.games 旧路径。成功卡不再渲染底部 messageBlock（成功时 message 已无信息量，
+ // 长日志反而把卡拉长）；失败卡仍保留（含排查建议）。
+ const sections=Array.isArray(data.sections)&&data.sections.length?data.sections:null
+ if(sections){
+  const x=UI.SIDE,w=p.width-UI.SIDE*2
+  sections.forEach(s=>{
+   // 小节标题：金色左侧标 + 账号名，右侧状态胶囊（与 darkHeader 金标语言一致）
+   p.rect(x,p.y+6,4,18,GOLD)
+   p.text(s.label||'',x+14,p.y+6,w-100,16,GOLD,{leading:20,singleLine:true,minSize:12})
+   if(s.badge)pill(p,s.badge,p.width-UI.SIDE-84,p.y+4,76)
+   p.y+=30
+   if(Array.isArray(s.games)&&s.games.length){gamesTable(p,s.games)}
+   else if(s.note){
+    // 未执行 / 失败原因：小字备注行（可换行）
+    const nh=p.lines(s.note,w-28,13).length*19
+    p.text(s.note,x+14,p.y+2,w-28,13,DARK.MUTED,{leading:19})
+    p.y+=nh+12
+   }
   })
-  p.restore()
-  p.y+=h+UI.SECTION
+ }else{
+  const rows=Array.isArray(data.games)?data.games:[]
+  if(rows.length)gamesTable(p,rows)
  }
  messageBlock(p,data.message)
+}
+// 签到游戏状态表（checkin-result 主体）：深色行 + 语义状态胶囊
+function gamesTable(p,rows){
+ const {WHITE,HEADER}=DARK
+ const x=UI.SIDE,w=p.width-UI.SIDE*2,pad=UI.PAD
+ const c1=Math.round(w*0.36),c2=Math.round(w*0.32),c3=w-c1-c2
+ const rowH=46,headH=42
+ const h=headH+rows.length*rowH
+ openPanel(p,x,p.y,w,h,UI.R.panel,DARK.PANEL,2,'solid')
+ p.rect(x,p.y,w,headH,HEADER)
+ const hy=p.y+14
+ const headOpt={leading:UI.T.label[1],singleLine:true,minSize:10}
+ // 列头统一走「标签＝中性灰」规则（不再用强调蓝，避免蓝色泛滥）
+ p.text('游戏 / 社区',x+pad,hy,c1-pad-8,UI.T.label[0],DARK.LABEL,headOpt)
+ p.text('游戏签到',x+c1,hy,c2-8,UI.T.label[0],DARK.LABEL,headOpt)
+ p.text('社区签到',x+c1+c2,hy,c3-pad-8,UI.T.label[0],DARK.LABEL,headOpt)
+ let ry=p.y+headH
+ rows.forEach((r,i)=>{
+  if(i%2===1)p.rect(x,ry,w,rowH,DARK.STRIPE)
+  p.text(r.label||'-',x+pad,ry+15,c1-pad-8,UI.T.body[0],WHITE,{leading:UI.T.body[1],singleLine:true,minSize:11})
+  pill(p,r.game||'未执行',x+c1,ry+13,c2-16)
+  pill(p,r.community||'未执行',x+c1+c2,ry+13,c3-pad-8)
+  if(i<rows.length-1)p.rule(x+pad,ry+rowH-1,w-pad*2,DARK.LINE)
+  ry+=rowH
+ })
+ p.restore()
+ p.y+=h+UI.SECTION
 }
 // （主题 / 调色板已上移至文件头部：GOLD / WHITE 等模块常量由 DARK 派生，故所有 builder 自动跟随主题）
 // 画布背景统一入口：由 elemental() 内部按主题处理（light → 浅色底；dark / glass → 元素背景图）
