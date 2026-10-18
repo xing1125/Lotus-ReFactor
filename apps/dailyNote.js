@@ -242,7 +242,7 @@ export class LotusDailyNote extends BasePlugin {
         }
       }
     }
-    await replyText(this, `${uids.length ? uids.join(" ") + " " : ""}查询中请稍等...`, { at: true })
+    await replyText(this, `${uids.length ? uids.join(" ") + " " : ""}查询中`, { at: true })
 
     const service = new DailyNoteService()
     const results = await service.collect({

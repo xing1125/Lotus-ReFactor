@@ -138,6 +138,9 @@ export class LotusCheckin extends BasePlugin {
       return true
     }
 
+    // jj 短格式：单条 @ 等待提示，随后静默执行，仅出结果图
+    await replyText(this, "签到中", { at: true })
+
     try {
       const outcome = await new ProfileSigninService().run({
         qq: userId,
