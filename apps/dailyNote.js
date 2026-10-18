@@ -133,12 +133,12 @@ export class LotusDailyNote extends BasePlugin {
     const match = this.e.msg.match(RESIN_PUSH_THRESHOLD_RE)
     const threshold = Number(match?.[2])
     if (!threshold) {
-      await replyText(this, "[荷花插件]请输入体力推送阈值，如「#体力推送阈值 160」。")
+      await replyText(this, "请输入体力推送阈值，如「#体力推送阈值 160」。")
       return true
     }
     const min = game === "gs" ? 80 : 120
     if (threshold < min) {
-      await replyText(this, `[荷花插件]${RESIN_GAME_NAME[game] || "该游戏"}体力推送阈值不可小于【${min}】。`)
+      await replyText(this, `${RESIN_GAME_NAME[game] || "该游戏"}体力推送阈值不可小于【${min}】。`)
       return true
     }
 
@@ -148,11 +148,11 @@ export class LotusDailyNote extends BasePlugin {
     const service = new ResinPushService()
     const block = await service.loadPushConfig()
     if (!block[botId]?.[userId]?.[groupId]) {
-      await replyText(this, "[荷花插件]你还没有开启体力推送哦，请先「#开启体力推送」。")
+      await replyText(this, "你还没有开启体力推送哦，请先「#开启体力推送」。")
       return true
     }
     await service.setThreshold({ botId, userId, groupId, game, threshold })
-    await replyText(this, `[荷花插件]${RESIN_GAME_NAME[game]}体力推送阈值已设为【${threshold}】。`)
+    await replyText(this, `${RESIN_GAME_NAME[game]}体力推送阈值已设为【${threshold}】。`)
     return true
   }
 
@@ -175,13 +175,13 @@ export class LotusDailyNote extends BasePlugin {
       for (const role of roles) uids.add(String(role.uid || role.game_uid || role))
     }
     if (!uids.size) {
-      await replyText(this, `[荷花插件]未查询到 ${gameName} 的已同步 UID，请先扫码登录并同步。`)
+      await replyText(this, `未查询到 ${gameName} 的已同步 UID，请先扫码登录并同步。`)
       return true
     }
 
     const targets = uidInput ? [uidInput] : [...uids]
     if (uidInput && !uids.has(uidInput)) {
-      await replyText(this, `[荷花插件]只能操作自己已同步的 ${gameName} UID（当前有：${[...uids].join("、")}）。`)
+      await replyText(this, `只能操作自己已同步的 ${gameName} UID（当前有：${[...uids].join("、")}）。`)
       return true
     }
 
@@ -198,7 +198,7 @@ export class LotusDailyNote extends BasePlugin {
           : `${gameName} UID:${uid} 未在本群开启体力推送`)
       }
     }
-    await replyText(this, `[荷花插件]${lines.join("\n")}`)
+    await replyText(this, `${lines.join("\n")}`)
     return true
   }
 
@@ -229,9 +229,20 @@ export class LotusDailyNote extends BasePlugin {
     const hasSuffix = /\d+$/.test(String(this.e.msg || ""))
     const profileId = hasSuffix ? parseProfileIdFromMessage(this.e.msg) : null
 
-    await replyText(this, profileId
-      ? `[荷花插件]正在查询 profile ${profileId} 的体力。`
-      : "[荷花插件]正在查询当前 QQ 的所有 profile 体力。", { at: true })
+    // jj 交互格式：先发一条 @ 文本（带全部已同步 UID + 「查询中请稍等...」），@ 全程只出现这一次
+    const uids = []
+    const profileIds = profileId ? [profileId] : await listProfileIds(userId).catch(() => [])
+    for (const pid of profileIds) {
+      const profile = await loadProfile(userId, pid).catch(() => null)
+      for (const game of games) {
+        const roles = normalizeRoles(profile?.account?.game_roles?.[game])
+        for (const role of roles) {
+          const uid = String(role.uid || role.game_uid || role)
+          if (uid && !uids.includes(uid)) uids.push(uid)
+        }
+      }
+    }
+    await replyText(this, `${uids.length ? uids.join(" ") + " " : ""}查询中请稍等...`, { at: true })
 
     const service = new DailyNoteService()
     const results = await service.collect({
@@ -241,12 +252,11 @@ export class LotusDailyNote extends BasePlugin {
     })
 
     if (!results.length) {
-      await replyText(this, "[荷花插件]没有找到可查询的 profile，请先扫码登录并同步 UID。", { at: true })
+      await replyText(this, "没有找到可查询的账号，请先 #扫码登录 并同步 UID。")
       return true
     }
 
-    // jj 模式：一发指令 → 每个游戏/账号各出一张独立面板（而非拼成一张长图）。
-    // renderDailyNotePanel 本身就是 ji 版式品牌面板，传单元素 panels 即为单卡。
+    // jj 出图格式：每个游戏/账号各一张独立面板，逐张发送，不带文字、不再 @、不带插件前缀
     for (const [index, item] of results.entries()) {
       const image = await renderTemplate("daily-note-summary", buildDailyNoteRenderData({
         userId,
@@ -256,7 +266,7 @@ export class LotusDailyNote extends BasePlugin {
       }), {
         saveId: `lotus-daily-note-${userId}-${profileId || "all"}-${item.game}-${item.uid || index}`,
       })
-      await replyImage(this, image, index === 0 ? "[荷花插件]体力查询完成。" : "", { at: true })
+      await replyImage(this, image, "")
       // 多张卡之间稍作间隔，避免刷屏风控
       if (results.length > 1 && index < results.length - 1) {
         await new Promise(resolve => setTimeout(resolve, 800))
