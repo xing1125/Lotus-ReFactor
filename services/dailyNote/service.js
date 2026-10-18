@@ -51,16 +51,8 @@ export class DailyNoteService {
 
       for (const game of games) {
         const roles = normalizeRoles(profile.account?.game_roles?.[game])
-        if (!roles.length) {
-          results.push({
-            ok: false,
-            profileId: id,
-            game,
-            uid: "",
-            error: "未同步 UID",
-          })
-          continue
-        }
+        // 未绑定该游戏（没同步过 UID）→ 静默跳过，不出「未绑定」错误面板（jj 行为：没有就不显示）
+        if (!roles.length) continue
 
         for (const role of roles) {
           results.push(await this.queryDailyNote(profile, game, role))
