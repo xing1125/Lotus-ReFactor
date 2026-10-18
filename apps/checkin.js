@@ -127,18 +127,16 @@ export class LotusCheckin extends BasePlugin {
       profile = await loadProfile(userId, profileId)
     } catch (error) {
       if (error?.code === "ENOENT") {
-        await replyText(this, `[荷花插件]profile ${profileId} 尚未配置，请先使用 #扫码登录${profileId === 1 ? "" : profileId}。`, { at: true })
+        await replyText(this, `profile ${profileId} 尚未配置，请先使用 #扫码登录${profileId === 1 ? "" : profileId}。`, { at: true })
         return true
       }
       throw error
     }
 
     if (!profile.account?.cookie) {
-      await replyText(this, `[荷花插件]profile ${profileId} 尚未保存 cookie，请先扫码登录。`, { at: true })
+      await replyText(this, `profile ${profileId} 尚未保存 cookie，请先扫码登录。`, { at: true })
       return true
     }
-
-    await replyText(this, `[荷花插件]开始执行 profile ${profileId} 签到，签到前会先刷新登录信息。`, { at: true })
 
     try {
       const outcome = await new ProfileSigninService().run({
@@ -151,8 +149,8 @@ export class LotusCheckin extends BasePlugin {
         },
       })
       await replyImage(this, outcome.image, outcome.ok
-        ? `[荷花插件]profile ${profileId} 签到完成。`
-        : `[荷花插件]profile ${profileId} 签到失败：${outcome.message}`, { at: true })
+        ? `签到完成。`
+        : `签到失败：${outcome.message}`, { at: true })
     } catch (error) {
       logger?.error?.(`[Lotus-Plugin] checkin failed: ${error.stack || error.message}`)
       const image = await renderStatusCard({
@@ -168,7 +166,7 @@ export class LotusCheckin extends BasePlugin {
       }, {
         saveId: `lotus-checkin-error-${userId}-${profileId}`,
       })
-      await replyImage(this, image, `[荷花插件]签到失败：${error.message}`, { at: true })
+      await replyImage(this, image, `签到失败：${error.message}`, { at: true })
     }
 
     return true
