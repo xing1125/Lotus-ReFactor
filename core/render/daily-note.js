@@ -11,8 +11,7 @@ import { encodeGpuCanvas } from "./gpu-buffer.js"
 //   头部（游戏 logo + 米游社 logo + UID + 日期 + 签到福利状态）
 //   → 左「主资源玻璃块」（大图标 + 资源名 + 45px 主数值 + 内嵌恢复时间卡）
 //   → 右「清单玻璃块」（3 行 图标/名称/数值 + 纹理分隔线 + 底部派遣胶囊）
-//   → 底色板（.bg-art）：角色立绘铺在深蓝底之上、所有玻璃块之下
-//
+//   → 底色板（.bg-art）：角色立绘铺在深蓝底之上、所有玻璃块之下//
 // 【配色为什么是写死的深蓝，而不是走主题真源】
 // 该版式与它依赖的上游图标资源（星铁.png / 米游社.png / 委托执行.png …）是「深底 + 白色字形」
 // 配对的：图标本身是白色或半透明，放到浅色主题上会直接隐身。所以这个面板是一块
@@ -21,14 +20,16 @@ import { encodeGpuCanvas } from "./gpu-buffer.js"
 // 与 starrail-abyss.js 的「语义色不随主题走」同理（稀有度卡面、命徽标）。
 const ROOT = path.join(resourcesPath, "daily-note")
 
-// ---- 上游色值（逐条来自 ji-plugin dailyNote.css，非杜撰）----
+// ---- 上游色值（对齐 ji-plugin dailyNote 实际渲染效果，参考用户提供的 jj 截图取色）----
+// 背景 = 中蓝 → 藏青对角渐变（顶部亮蓝 #2F619B → 底部深藏青 #1A3453）+ 青色光晕；
+// 玻璃块 = 蓝色调半透明（不是灰白玻璃），描边白、顶部高光白。
 const NAVY = {
   angle: 160,
-  stops: [["#1B3358", 0], ["#1F3A64", .5], ["#284A78", 1]],
-  base: "#142844",
+  stops: [["#1A3453", 0], ["#26507E", .5], ["#2F619B", 1]],
+  base: "#16304E",
   glows: [
-    { c: "#00E5FF", x: .18, y: .14, r: .50, a: .28 },
-    { c: "#38BDF8", x: .88, y: .90, r: .54, a: .22 },
+    { c: "#00E5FF", x: .18, y: .14, r: .50, a: .24 },
+    { c: "#38BDF8", x: .88, y: .90, r: .54, a: .20 },
   ],
 }
 const C = {
@@ -42,8 +43,8 @@ const C = {
   red: "#F87171",        // 每日实训未满
   line: "#D3BC8E",       // line.png / star.png 的奶油金
 }
-const GLASS = { fill: "rgba(255,255,255,.09)", line: "rgba(255,255,255,.28)", shadow: "rgba(0,0,0,.32)", sheen: "rgba(255,255,255,.35)" }
-const GLASS_IN = { fill: "rgba(255,255,255,.07)", line: "rgba(255,255,255,.25)", shadow: "rgba(0,0,0,.35)", sheen: null }
+const GLASS = { fill: "rgba(96,156,230,.28)", line: "rgba(255,255,255,.32)", shadow: "rgba(0,0,0,.32)", sheen: "rgba(255,255,255,.35)" }
+const GLASS_IN = { fill: "rgba(64,126,200,.26)", line: "rgba(255,255,255,.26)", shadow: "rgba(0,0,0,.35)", sheen: null }
 
 const W = 800, PANEL_H = 376, PANEL_GAP = 20
 const LOGO_SIZE = { gs: 90, sr: 90, zzz: 72 }
@@ -324,7 +325,7 @@ export async function renderDailyNotePanel(data = {}, options = {}) {
       const rowY = sy + 56
       if (dayText) text(dayText, startX, rowY + 9, 18, C.cyan, dayW + 4, "left", 600)
       ctx.save()
-      ctx.fillStyle = "rgba(255,255,255,.10)"
+      ctx.fillStyle = "rgba(96,156,230,.25)"
       ctx.beginPath(); ctx.roundRect(dayText ? startX + dayW + 6 : sx + (sw - pillW) / 2, rowY, pillW, pillH, 18); ctx.fill()
       ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.35)"
       ctx.beginPath(); ctx.roundRect(dayText ? startX + dayW + 6 : sx + (sw - pillW) / 2 + .5, rowY + .5, pillW - 1, pillH - 1, 18); ctx.stroke()
