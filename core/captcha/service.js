@@ -3,6 +3,7 @@ import { gtManualProvider } from "./providers/gtManual.js"
 import { testNineProvider } from "./providers/testNine.js"
 import { ttocrProvider } from "./providers/ttocr.js"
 import { visionAiProvider } from "./providers/visionAi.js"
+import { luluPlaoProvider } from "./providers/luluPlao.js"
 import { captchaFail, normalizeCaptchaChallenge } from "./result.js"
 import { emitCaptchaEvent } from "./events.js"
 
@@ -16,6 +17,11 @@ const PROVIDERS = {
   vision_ai: visionAiProvider,
   visionai: visionAiProvider,
   "vision-ai": visionAiProvider,
+  lulu_plao: luluPlaoProvider,
+  luluplao: luluPlaoProvider,
+  "lulu-plao": luluPlaoProvider,
+  lulu: luluPlaoProvider,
+  plao: luluPlaoProvider,
 }
 
 export class CaptchaService {

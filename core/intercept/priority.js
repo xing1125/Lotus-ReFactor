@@ -16,6 +16,10 @@ export const LOTUS_CONFIG_DISABLED_PLUGIN_NAMES = Object.freeze([
   "Atlas图鉴帮助",
   "Atlas原魔属性计算",
 
+  // achievements-plugin overlaps. Lotus owns achievement import/catalog rendering.
+  "成就查漏",
+  "achievements-plugin",
+
   // xiaoyao catch-all adapter
   "xiaoyao-cvs-plugin",
 
@@ -62,6 +66,12 @@ export const LOTUS_CONFIG_DISABLED_PLUGIN_NAMES = Object.freeze([
   // Liangshi atlas/wiki overlaps.
   "Wiki",
   "wuwaWiki",
+
+  // FanSky_Qs team damage overlaps.
+  "提瓦特小助手",
+
+  // TianRu-plugin Gclog constructor name (not its directory or class name).
+  "提瓦特小助手抽卡记录",
 
   // loveMys / related captcha handler overlaps.
   "mys请求错误处理",

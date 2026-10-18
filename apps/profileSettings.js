@@ -44,6 +44,8 @@ export class LotusProfileSettings extends BasePlugin {
         { reg: `^#绑定云(原神|绝区零)token${PROFILE_ID_SUFFIX_PATTERN}\\s+.+$`, fnc: "updateSettings" },
         { reg: `^#(启用|开启|关闭|禁用)云(原神|绝区零)(签到)?${PROFILE_ID_SUFFIX_PATTERN}$`, fnc: "updateSettings" },
         { reg: `^#(绑定|设置|切换)(原神|星铁|崩铁|绝区零|绝)(uid|UID)${PROFILE_ID_SUFFIX_PATTERN}\\s*\\d{8,10}$`, fnc: "updateSettings" },
+        { reg: `^#设置社区签到(经验|米币)${PROFILE_ID_SUFFIX_PATTERN}$`, fnc: "updateSettings" },
+        { reg: `^#(禁用|解禁)(原神|星铁|崩铁|绝区零|绝)?(uid|UID)?${PROFILE_ID_SUFFIX_PATTERN}\\s*\\d{8,10}$`, fnc: "updateSettings" },
       ],
     })
   }

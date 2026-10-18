@@ -10,8 +10,11 @@ __pycache__/
 .yarn/
 .yarnrc.yml
 yarn.lock
-data/
+/data/
+services/starRailTeamDamage/data/system-data.json
 temp/
 config/global.yaml
 config/local.yaml
 config/*.local.yaml
+.workbuddy/
+preview/

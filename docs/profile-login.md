@@ -1,5 +1,7 @@
 # 登录与多 profile
 
+返回：[项目主页](../README.md) / [文档目录](README.md)
+
 一个 QQ 最多允许 `1..255` 个 Lotus profile。
 
 - `#扫码登录` 绑定 profile 1。
@@ -32,3 +34,7 @@ profile 只是 Lotus 内部槽位，不等于米哈游 `ltuid`，也不等于游
 ```
 
 资料卡会显示登录态、设备、角色、签到开关和通知设置。敏感字段会脱敏。
+
+相关小功能：
+
+- [设备信息-profile 绑定](features/device.md)

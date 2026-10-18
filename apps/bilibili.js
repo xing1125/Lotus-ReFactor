@@ -10,8 +10,16 @@ import { replyImage, replyText } from "../core/transport/reply.js"
 import {
   BilibiliService,
   formatNumber,
+  normalizeCleanupConfig,
   normalizeDownloadConfig,
 } from "../services/bilibili/service.js"
+import {
+  isVideoFile,
+  normalizeTranscodeConfig,
+  normalizeWechatVideoLimitMb,
+  scheduleTempCleanup,
+  transcodeVideoToTarget,
+} from "../services/bilibili/transcode.js"
 import { ToolInstallerService } from "../services/tools/installer.js"
 
 const searchCache = new Map()
@@ -36,7 +44,7 @@ export class LotusBilibili extends BasePlugin {
     this.task = [
       {
         name: "荷花插件B站下载清理",
-        cron: "0 30 3 * * ? *",
+        cron: "0 10 4 * * ? *",
         fnc: this.cleanupDownloads.bind(this),
         log: false,
       },
@@ -44,6 +52,8 @@ export class LotusBilibili extends BasePlugin {
   }
 
   async init() {
+    const globalConfig = await loadGlobalConfig()
+    if (!normalizeCleanupConfig(globalConfig.bilibili).startup) return
     const timer = setTimeout(() => {
       this.cleanupDownloads({ trigger: "startup" }).catch(error => {
         logger?.warn?.(`[Lotus-Plugin] Bilibili cleanup failed: ${error.message}`)
@@ -276,6 +286,7 @@ export class LotusBilibili extends BasePlugin {
     }
 
     const service = options.service || await createService()
+    let result
     try {
       const installPermission = new PermissionService({ permissions: globalConfig.permissions })
         .explain(this.e, "tools.install")
@@ -285,7 +296,7 @@ export class LotusBilibili extends BasePlugin {
           throw new Error(`工具链初始化失败：${tools.items?.filter(item => !item.ok).map(item => `${item.name}:${item.reason}`).join(" / ") || "unknown"}`)
         }
       }
-      const result = await service.download(target, {
+      result = await service.download(target, {
         ...(globalConfig.bilibili || {}),
         ...(globalConfig.bilibili?.download || {}),
       }, {
@@ -306,6 +317,17 @@ export class LotusBilibili extends BasePlugin {
       }
     } catch (error) {
       await this.renderError(options.title || "B站下载", error)
+    } finally {
+      const cleanupConfig = normalizeCleanupConfig(globalConfig.bilibili)
+      if (cleanupConfig.enable && cleanupConfig.delete_after_send && result?.files?.length) {
+        const released = await service.releaseDownloadedFiles(result.files).catch(error => {
+          logger?.warn?.(`[Lotus-Plugin] Bilibili post-send cleanup failed: ${error.message}`)
+          return null
+        })
+        if (released?.removedFiles) {
+          logger?.mark?.(`[Lotus-Plugin] Bilibili post-send cleanup removed ${released.removedFiles} files, freed ${released.freedBytes} bytes`)
+        }
+      }
     }
     return true
   }
@@ -317,7 +339,7 @@ export class LotusBilibili extends BasePlugin {
       ...(globalConfig.bilibili || {}),
       ...(globalConfig.bilibili?.download || {}),
     })
-    logger?.mark?.(`[Lotus-Plugin] Bilibili cleanup finished: ${result.removedEntries} cache entries, ${result.removedFiles} files, trigger=${options.trigger || "schedule"}`)
+    logger?.mark?.(`[Lotus-Plugin] Bilibili cleanup finished: ${result.removedEntries} cache entries, ${result.removedFiles} files, freed=${result.freedBytes || 0} bytes, trigger=${options.trigger || "schedule"}`)
     return result
   }
 
@@ -363,19 +385,69 @@ async function imageFileToDataUrl(file) {
 
 async function sendBiliFile(e, file, config = {}) {
   const stat = await fs.stat(file)
-  const sizeMb = stat.size / 1024 / 1024
-  const ext = path.extname(file).toLowerCase()
-  const segment = globalThis.segment
-  if ([".mp4", ".mkv", ".flv", ".mov", ".m4v"].includes(ext)
-    && sizeMb <= Number(config.video_size_limit_mb || 100)
-    && segment?.video) {
-    await e.reply(segment.video(file))
-    return
+  const sizeMb = stat.size / (1000 * 1000)
+  const videoLimitMb = Number(config.video_size_limit_mb || 100)
+  const wxLimitMb = normalizeWechatVideoLimitMb(config.video_wx_limit_mb)
+
+  let videoFailure = ""
+  if (isVideoFile(file) && sizeMb <= videoLimitMb && globalThis.segment?.video) {
+    const result = await sendBiliVideoMessage(e, file, config, { sizeMb, wxLimitMb })
+    if (result.ok) return
+    videoFailure = result.reason
+    logger?.warn?.(`[Lotus-Plugin] Bilibili video message skipped: ${result.reason}`)
   }
 
   if (e.isGroup && e.group?.sendFile) return e.group.sendFile(file, path.basename(file))
   if (e.friend?.sendFile) return e.friend.sendFile(file, path.basename(file))
+  if (videoFailure) throw new Error(videoFailure)
   throw new Error("当前适配器不支持发送文件")
+}
+
+async function sendBiliVideoMessage(e, file, config, { sizeMb, wxLimitMb }) {
+  const segment = globalThis.segment
+  let playable = file
+  let tempFile = ""
+
+  if (sizeMb > wxLimitMb) {
+    const transcode = normalizeTranscodeConfig(config.video_transcode)
+    if (!transcode.enable) {
+      return {
+        ok: false,
+        reason: `视频 ${sizeMb.toFixed(1)}MB 超过微信 ${wxLimitMb}MB 上限，且未启用发送前压缩，改为文件发送。`,
+      }
+    }
+
+    if (transcode.notify) {
+      await e.reply(`[荷花插件]视频 ${sizeMb.toFixed(1)}MB 超过微信 ${wxLimitMb}MB 上限，正在压缩到 ${transcode.target_mb}MB 以内再发送，请稍候。`)
+        .catch(() => null)
+    }
+
+    const result = await transcodeVideoToTarget({
+      input: file,
+      config: transcode,
+      toolsPath: config.tools_path,
+      onEvent: event => {
+        if (event.message) logger?.debug?.(`[Lotus-Plugin] Bilibili transcode: ${event.message}`)
+      },
+    })
+    if (!result.ok) {
+      return { ok: false, reason: `视频压缩未成功（${result.reason}），改为文件发送。` }
+    }
+
+    playable = result.file
+    tempFile = result.file
+    logger?.mark?.(`[Lotus-Plugin] Bilibili video transcoded to ${result.sizeMb}MB (${result.videoKbps}kbps, ${result.attempts} attempt[s])`)
+  }
+
+  try {
+    await e.reply(segment.video(playable))
+    // 适配器可能仍在后台读取本地文件，延迟清理，避免刚发出就被删。
+    if (tempFile) scheduleTempCleanup(tempFile)
+    return { ok: true }
+  } catch (error) {
+    if (tempFile) scheduleTempCleanup(tempFile, 60000)
+    return { ok: false, reason: `视频消息发送失败：${error.message}` }
+  }
 }
 
 function downloadFailureMessage(result = {}) {

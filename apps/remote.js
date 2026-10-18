@@ -1,4 +1,5 @@
 const BasePlugin = globalThis.plugin
+import { accountDisplay } from "../services/checkin/account.js"
 
 import { renderStatusCard, renderTemplate } from "../core/render/service.js"
 import { loadGlobalConfig } from "../core/config/global.js"
@@ -30,7 +31,7 @@ export class LotusRemote extends BasePlugin {
           fnc: "otpStatus",
         },
         {
-          reg: "^#(远程管理员spawn|admin\\s+spawn|远程spawn|spawn)\\s+\\d{6}\\s+(pwsh|powershell|cmd)\\s+[\\s\\S]+$",
+          reg: "^#(远程管理员spawn|admin\\s+spawn|远程spawn|spawn)\\s+\\d{6}\\s+(pwsh|powershell|cmd|bash|sh|zsh)\\s+[\\s\\S]+$",
           fnc: "spawnCommand",
         },
         {
@@ -86,7 +87,7 @@ export class LotusRemote extends BasePlugin {
     const status = await remoteOtpStatus(globalConfig.remote || {})
     const image = await renderStatusCard({
       title: "远程 2FA 状态",
-      subtitle: `QQ ${this.e.user_id}`,
+      subtitle: `${accountDisplay(String(this.e.user_id))}`,
       badge: status.ok ? "已配置" : "未配置",
       message: status.message,
       userId: this.e.user_id,
@@ -105,7 +106,7 @@ export class LotusRemote extends BasePlugin {
   async spawnCommand() {
     const parsed = parseRemoteSpawn(this.e.msg)
     if (!parsed) {
-      await replyText(this, "[荷花插件]格式：#远程spawn 123456 pwsh Get-Process")
+      await replyText(this, "[荷花插件]格式：#远程spawn 123456 pwsh Get-Process（Linux：#远程spawn 123456 bash uname -a）")
       return true
     }
 
@@ -116,7 +117,7 @@ export class LotusRemote extends BasePlugin {
     })
     const image = await renderStatusCard({
       title: "远程 Spawn",
-      subtitle: `QQ ${this.e.user_id} · ${parsed.shell}`,
+      subtitle: `${accountDisplay(String(this.e.user_id))} · ${parsed.shell}`,
       badge: result.ok ? "成功" : "失败",
       message: result.ok
         ? (result.stdout || "命令运行成功，无 stdout。").slice(0, 220)
@@ -192,7 +193,7 @@ export class LotusRemote extends BasePlugin {
 async function renderRemoteFileResult(title, result, userId) {
   return renderStatusCard({
     title,
-    subtitle: `QQ ${userId}`,
+    subtitle: `${accountDisplay(String(userId))}`,
     badge: result.ok ? "成功" : "失败",
     message: result.ok
       ? `${result.name || "文件"} · ${formatBytes(result.size || 0)}`

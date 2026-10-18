@@ -1,7 +1,26 @@
-export const CURRENT_GLOBAL_CONFIG_VERSION = 1
+export const CURRENT_GLOBAL_CONFIG_VERSION = 3
+
+const ATLAS_BASE_SCOPE_ARGS = Object.freeze([
+  "--game", "gi,hsr,zzz",
+  "--locale", "zh",
+  "--page", "gi=character,weapon,artifact,achievement/achievement,monster,tower,rolecombat,leyline",
+  "--page", "hsr=character,lightcone,relicset,achievement/achievement,monster,monstervalue,EliteGroup,HardLevelGroup,InfiniteEliteGroup,maze,maze_peak,maze_boss,maze_extra",
+  "--page", "zzz=character,weapon,equipment,bangboo,achievement/achievement,monster,shiyu,boss",
+])
+
+const ATLAS_CHALLENGE_SCOPE_ARGS = Object.freeze([
+  "--game", "gi,hsr,zzz",
+  "--locale", "zh",
+  "--page", "gi=monster,tower,rolecombat,leyline",
+  "--page", "hsr=monster,monstervalue,EliteGroup,HardLevelGroup,InfiniteEliteGroup,maze,maze_peak,maze_boss,maze_extra",
+  "--page", "zzz=monster,shiyu,boss",
+])
 
 export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
   version: CURRENT_GLOBAL_CONFIG_VERSION,
+  // 功能模块开关（锅巴「功能开关」）：键 = core/config/modules.js 注册表 id。
+  // 缺省 / true = 启用；显式 false = 关闭（命令回复提示并吞掉）。签到链路走 scheduler.* 独立开关，不在此列。
+  modules: {},
   render: {
     background: [
       "https://api.lvxiaodong.com/api/ys?return=json",
@@ -11,6 +30,10 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
       "https://api.dujin.org/pic/yuanshen/",
     ],
     theme_color: "#66ccff",
+    // 配色主题（crystal 清透冰雾 / mist 云雾奶油 / saas 扁平 SaaS / ice 冰蓝毛玻璃 /
+    //   aurora 赛博极光 / dawn 晨曦微光 / light 明亮通透 / glass 提亮玻璃 / dark 上游深色）
+    // 全插件所有卡片共用；改这里即全局生效，入口命令无需重启参数。
+    theme: "crystal",
     background_timeout_ms: 3000,
   },
   scheduler: {
@@ -30,6 +53,23 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
       window_end: "23:59",
       notify: true,
     },
+    forced_disables: {
+      checkin_all: false,
+      genshin: false,
+      honkai_sr: false,
+      zzz: false,
+      mihoyobbs: false,
+    },
+  },
+  // 体力推送（移植自 ji-plugin note.js 的体力阈值推送）
+  // 命令：#开启体力推送 [uid] / #关闭体力推送 [uid] / #体力推送阈值 <n>（可前缀 原神/星铁/绝区零）
+  resin_push: {
+    enable: true,
+    cron: "0 */10 * * * ? *",
+    cooldown_hours: 6,
+    gs_threshold: 160,
+    sr_threshold: 240,
+    zzz_threshold: 240,
   },
   captcha: {
     providers: ["test_nine", "ttocr", "gtmanual"],
@@ -86,6 +126,17 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
       key: "",
       timeout_ms: 60000,
     },
+    // lulu / plao 外部付费 geetest 过码（移植自 ji-plugin）。token 需自行购买并注入。
+    // provider 指定首选（lulu/plao），未配置 token 时该 provider 自动跳过，由其它 provider 兜底。
+    lulu_plao: {
+      enable: false,
+      provider: "lulu",
+      lulu_url: "https://api.sayu-bot.com",
+      lulu_token: "",
+      plao_url: "http://api.114514616.xyz",
+      plao_token: "",
+      timeout_ms: 15000,
+    },
   },
   python: {
     mode: "venv",
@@ -127,7 +178,7 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
     restrict_file_paths: true,
     allowed_paths: ["data/remote"],
     allow_admin: false,
-    shells: ["pwsh", "powershell", "cmd"],
+    shells: ["pwsh", "powershell", "cmd", "bash", "sh", "zsh"],
   },
   bilibili: {
     cookie: "",
@@ -140,12 +191,38 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
       resolution: 64,
       duration_limit_seconds: 3600,
       video_size_limit_mb: 100,
+      video_wx_limit_mb: 20,
+      video_transcode: {
+        enable: true,
+        notify: true,
+        target_mb: 19,
+        max_height: 1080,
+        audio_kbps: 96,
+        min_video_kbps: 150,
+        max_duration_seconds: 1800,
+        preset: "veryfast",
+        timeout_ms: 900000,
+      },
       max_estimated_size_mb: 0,
       multi_page_policy: "zip",
       cache_enable: true,
       cache_ttl_seconds: 0,
       timeout_ms: 600000,
       extra_args: [],
+    },
+  },
+  douyin: {
+    enable: true,
+    request_timeout_ms: 15000,
+    download: {
+      enable: true,
+      tools_path: "data/tools/bin",
+      quality: "adapt",
+      duration_limit_seconds: 3600,
+      video_size_limit_mb: 100,
+      max_estimated_size_mb: 0,
+      multi_page_policy: "zip",
+      timeout_ms: 600000,
     },
   },
   groups: {
@@ -157,9 +234,12 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
       keep_if_private_possible: true,
     },
   },
+  tuneweave: {
+    api_url: "http://127.0.0.1:7832",
+    request_timeout_ms: 30000,
+  },
   netease_partner: {
     enable: false,
-    api_url: "http://127.0.0.1:3000",
     schedule: "0 5 0 * * ? *",
     auto_catch_up: false,
     notify_master: true,
@@ -181,16 +261,18 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
     sync_after_update: true,
     sync_gallery: true,
     initial_command: "node",
-    initial_args: ["src/scrape.mjs", "--mode", "full"],
+    initial_args: ["src/scrape.mjs", "--mode", "full", ...ATLAS_BASE_SCOPE_ARGS],
     update_command: "node",
-    update_args: ["src/scrape.mjs", "--mode", "incremental"],
+    update_args: ["src/scrape.mjs", "--mode", "incremental", ...ATLAS_BASE_SCOPE_ARGS],
+    challenge_args: ["src/scrape.mjs", "--mode", "incremental", ...ATLAS_CHALLENGE_SCOPE_ARGS],
     version_command: "node",
-    version_args: ["src/scrape.mjs", "--list-versions"],
+    version_args: ["src/scrape.mjs", "--list-versions", "--game", "gi,hsr,zzz"],
     update_timeout_ms: 1800000,
     update_output_limit: 12000,
     auto_update: {
       enable: true,
       check_cron: "0 0 */6 * * ? *",
+      challenge_cron: "0 15 */2 * * ? *",
       run_on_missing_data: true,
     },
   },
@@ -243,6 +325,9 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
       },
       "bilibili.login": {
         policy: "master_only",
+      },
+      "douyin.download": {
+        policy: "inherit",
       },
       "bilibili.download": {
         policy: "inherit",

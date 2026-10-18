@@ -1,4 +1,5 @@
 const BasePlugin = globalThis.plugin
+import { accountDisplay } from "../services/checkin/account.js"
 
 import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
 import { replyCaptchaEvent } from "../core/captcha/notify.js"
@@ -29,6 +30,25 @@ export class LotusCheckin extends BasePlugin {
         },
         {
           reg: `^#((测试|开始|手动)签到|补签)${PROFILE_ID_SUFFIX_PATTERN}$`,
+          fnc: "runSignin",
+        },
+        {
+          // 兼容 ji-plugin 旧指令：游戏签到（星铁/原神/游戏/崩三…），均映射到统一签到（可省略 #）
+          reg: `^#?(星铁|原神|游戏|崩三|崩崩崩|崩坏3|崩坏|绝区零)?签到${PROFILE_ID_SUFFIX_PATTERN}$`,
+          fnc: "runSignin",
+        },
+        {
+          // 兼容 ji-plugin 旧指令：米游社社区签到（#米游社原神签到 / #mys签到 等，可省略 #）
+          reg: `^#?(米游社|mys)(原神|崩坏3|崩坏2|未定事件簿|大别野|崩坏星穹铁道|星穹铁道|绝区零|全部)?签到${PROFILE_ID_SUFFIX_PATTERN}$`,
+          fnc: "runSignin",
+        },
+        {
+          // 兼容 ji-plugin 旧指令：全部签到/签到任务（游戏+社区批量，映射到统一签到）
+          reg: `^#(重新)?(全部签到|签到任务)$`,
+          fnc: "runSignin",
+        },
+        {
+          reg: `^#社区(重新)?(全部签到|签到任务)$`,
           fnc: "runSignin",
         },
       ],
@@ -107,18 +127,18 @@ export class LotusCheckin extends BasePlugin {
       profile = await loadProfile(userId, profileId)
     } catch (error) {
       if (error?.code === "ENOENT") {
-        await replyText(this, `[荷花插件]profile ${profileId} 尚未配置，请先使用 #扫码登录${profileId === 1 ? "" : profileId}。`)
+        await replyText(this, `[荷花插件]profile ${profileId} 尚未配置，请先使用 #扫码登录${profileId === 1 ? "" : profileId}。`, { at: true })
         return true
       }
       throw error
     }
 
     if (!profile.account?.cookie) {
-      await replyText(this, `[荷花插件]profile ${profileId} 尚未保存 cookie，请先扫码登录。`)
+      await replyText(this, `[荷花插件]profile ${profileId} 尚未保存 cookie，请先扫码登录。`, { at: true })
       return true
     }
 
-    await replyText(this, `[荷花插件]开始执行 profile ${profileId} 签到，签到前会先刷新登录信息。`)
+    await replyText(this, `[荷花插件]开始执行 profile ${profileId} 签到，签到前会先刷新登录信息。`, { at: true })
 
     try {
       const outcome = await new ProfileSigninService().run({
@@ -132,12 +152,12 @@ export class LotusCheckin extends BasePlugin {
       })
       await replyImage(this, outcome.image, outcome.ok
         ? `[荷花插件]profile ${profileId} 签到完成。`
-        : `[荷花插件]profile ${profileId} 签到失败：${outcome.message}`)
+        : `[荷花插件]profile ${profileId} 签到失败：${outcome.message}`, { at: true })
     } catch (error) {
       logger?.error?.(`[Lotus-Plugin] checkin failed: ${error.stack || error.message}`)
       const image = await renderStatusCard({
         title: "签到失败",
-        subtitle: `QQ ${userId} · Profile ${profileId}`,
+        subtitle: `${accountDisplay(String(userId))} · Profile ${profileId}`,
         badge: "失败",
         message: error.message,
         userId,
@@ -148,7 +168,7 @@ export class LotusCheckin extends BasePlugin {
       }, {
         saveId: `lotus-checkin-error-${userId}-${profileId}`,
       })
-      await replyImage(this, image, `[荷花插件]签到失败：${error.message}`)
+      await replyImage(this, image, `[荷花插件]签到失败：${error.message}`, { at: true })
     }
 
     return true

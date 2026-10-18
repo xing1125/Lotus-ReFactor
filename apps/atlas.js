@@ -1,8 +1,8 @@
 const BasePlugin = globalThis.plugin
 
 import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
-import { renderStatusCard, renderTemplate } from "../core/render/service.js"
-import { replyImage, replyText } from "../core/transport/reply.js"
+import { renderStatusCard, renderTemplate, renderAtlasBook } from "../core/render/service.js"
+import { replyImage, replyText, replyForward } from "../core/transport/reply.js"
 import { loadGlobalConfig } from "../core/config/global.js"
 import { PermissionService } from "../core/permissions/service.js"
 import {
@@ -12,7 +12,7 @@ import {
   parseAtlasShortcutMessage,
   selectAtlasTemplate,
 } from "../services/nanokaAtlas/service.js"
-import { AtlasUpdateService } from "../services/nanokaAtlas/update.js"
+import { AtlasUpdateService, readLocalVersionSnapshot } from "../services/nanokaAtlas/update.js"
 
 export class LotusAtlas extends BasePlugin {
   constructor() {
@@ -34,6 +34,7 @@ export class LotusAtlas extends BasePlugin {
       const globalConfig = await loadGlobalConfig()
       await this.refreshShortcutRoutes()
       this.task = this.buildAtlasTasks(globalConfig)
+      void this.runAtlasChallengeAutoUpdate({ startup: true }).catch(() => {})
     } catch (error) {
       logger?.warn?.(`[Lotus-Plugin] load atlas cron failed, fallback default: ${error.message}`)
     }
@@ -51,6 +52,12 @@ export class LotusAtlas extends BasePlugin {
         name: "荷花插件图鉴快捷路由刷新",
         cron: "0 0 0 * * ? *",
         fnc: this.refreshShortcutRoutes.bind(this),
+        log: false,
+      },
+      {
+        name: "荷花插件图鉴挑战刷新",
+        cron: globalConfig.atlas?.auto_update?.challenge_cron || "0 15 */2 * * ? *",
+        fnc: this.runAtlasChallengeAutoUpdate.bind(this),
         log: false,
       },
     ]
@@ -126,6 +133,30 @@ export class LotusAtlas extends BasePlugin {
     return true
   }
 
+  async resetAtlas() {
+    const permission = await this.assertUpdatePermission("图鉴重置")
+    if (!permission) return true
+
+    const globalConfig = await loadGlobalConfig()
+    const result = await new AtlasUpdateService().reset(globalConfig.atlas || {})
+    await this.refreshShortcutRoutes()
+    const image = await renderStatusCard({
+      title: "图鉴重置",
+      subtitle: "Nanoka Atlas",
+      badge: result.ok ? "DONE" : "STOP",
+      message: result.message || "图鉴缓存清理失败。",
+      userId: this.e.user_id,
+      items: [
+        { label: "目录", value: result.root || "未知" },
+        { label: "后续", value: "执行 #全量更新图鉴 重新初始化" },
+      ],
+    }, {
+      saveId: "lotus-atlas-reset-" + (this.e.user_id || "master"),
+    })
+    await replyImage(this, image, result.ok ? "[荷花插件]图鉴缓存已重置。" : "[荷花插件]图鉴重置失败。")
+    return true
+  }
+
   async assertUpdatePermission(title) {
     const globalConfig = await loadGlobalConfig()
     const permission = new PermissionService({ permissions: globalConfig.permissions })
@@ -164,6 +195,26 @@ export class LotusAtlas extends BasePlugin {
     return result
   }
 
+  async runAtlasChallengeAutoUpdate({ startup = false } = {}) {
+    const globalConfig = await loadGlobalConfig()
+    const config = globalConfig.atlas || {}
+    if (config.auto_update?.enable === false) {
+      return { ok: true, skipped: true, reason: "auto_update_disabled" }
+    }
+    const local = await readLocalVersionSnapshot(config)
+    if (!local.ready) {
+      return { ok: true, skipped: true, reason: "base_atlas_missing" }
+    }
+    const result = await new AtlasUpdateService().run(config, { mode: "challenge" })
+    if (result.ok) {
+      await this.refreshRoutesAfterAtlasUpdate(result)
+      if (!startup) logger?.mark?.("[Lotus-Plugin] atlas challenge refresh completed")
+    } else {
+      logger?.warn?.("[Lotus-Plugin] atlas challenge refresh failed: " + (result.reason || "unknown"))
+    }
+    return result
+  }
+
   async refreshRoutesAfterAtlasUpdate(result) {
     if (!result?.ok || result.skipped) return
     await this.refreshShortcutRoutes().catch(error => {
@@ -179,8 +230,7 @@ export class LotusAtlas extends BasePlugin {
     }
 
     const result = await new NanokaAtlasService().search(query)
-    const image = await renderAtlasSearchResult(result, this.e.user_id)
-    await replyImage(this, image, result.ok ? "[荷花插件]图鉴查询完成。" : "[荷花插件]没有找到图鉴结果。")
+    await sendAtlasSearchResult(this, result)
     return true
   }
 
@@ -223,8 +273,7 @@ export class LotusAtlas extends BasePlugin {
       return true
     }
 
-    const image = await renderAtlasSearchResult(result, this.e.user_id)
-    await replyImage(this, image, "[荷花插件]图鉴查询完成。")
+    await sendAtlasSearchResult(this, result)
     return true
   }
 
@@ -238,11 +287,12 @@ export class LotusAtlas extends BasePlugin {
       items: [
         { label: "直查", value: "#星见雅 / #雾切之回光 / #雾切 / #冰封迷途的勇士" },
         { label: "显式", value: "#图鉴 神里绫华 / #荷花图鉴 星见雅" },
-        { label: "挑战图鉴", value: "#本期幽境 / #本期幻想 / *上期末日 / %下期防卫战" },
+        { label: "挑战图鉴", value: "#本期幽境图鉴 / #本期幻想图鉴 / *上期末日图鉴 / %下期防卫战图鉴" },
         { label: "不抢占", value: "#深渊 / #幻想 / #幽境 / *混沌 / %防卫战 仍交给挑战数据插件" },
         { label: "状态", value: "#图鉴状态" },
         { label: "更新", value: "#更新图鉴" },
         { label: "全量", value: "#全量更新图鉴" },
+        { label: "重置", value: "#重置图鉴（只清插件缓存）" },
         { label: "数据目录", value: "global.yaml: atlas.data_root" },
         { label: "后端目录", value: "global.yaml: atlas.backend_root" },
       ],
@@ -273,6 +323,10 @@ function composeAtlasRules(shortcutRules = []) {
       fnc: "fullUpdateAtlas",
     },
     {
+      reg: "^#?(Lotus|lotus|荷花)?(重置图鉴|图鉴重置|清空图鉴)$",
+      fnc: "resetAtlas",
+    },
+    {
       reg: "^#?(Lotus|lotus|荷花)?图鉴帮助$",
       fnc: "help",
     },
@@ -281,19 +335,19 @@ function composeAtlasRules(shortcutRules = []) {
       fnc: "query",
     },
     {
-      reg: "^[#*%％][\\s\\S]{1,}图鉴$",
+      reg: "^(?![#*%％][\\s\\S]*(?:攻略|练度统计)[\\s\\S]*$)[#*%％][\\s\\S]{1,}图鉴$",
       fnc: "shortcutQuery",
     },
     {
-      reg: "^#(?:星铁|星穹铁道|崩坏星穹铁道|崩铁|绝区零|绝区|原神)?[\\s\\S]{1,}图鉴$",
+      reg: "^(?!#[\\s\\S]*(?:攻略|练度统计)[\\s\\S]*$)#(?:星铁|星穹铁道|崩坏星穹铁道|崩铁|绝区零|绝区|原神)?[\\s\\S]{1,}图鉴$",
       fnc: "shortcutQuery",
     },
     {
-      reg: "^(?!#(?:今日|今天|每日|我的|明天|明日|周(?:[1-7]|一|二|三|四|五|六|日))*(?:素材|材料|天赋)[ |0-9]*$)[#*%％][\\s\\S]{1,}(?:命座|星魂|影画|天赋)$",
+      reg: "^(?!#(?:今日|今天|每日|我的|明天|明日|周(?:[1-7]|一|二|三|四|五|六|日))*(?:素材|材料|天赋)[ |0-9]*(?:图鉴)?$)[#*%％][\\s\\S]{1,}(?:命座|星魂|影画|天赋)(?:图鉴)?$",
       fnc: "shortcutQuery",
     },
     {
-      reg: "^(?!#(?:今日|今天|每日|我的|明天|明日|周(?:[1-7]|一|二|三|四|五|六|日))*(?:素材|材料|天赋)[ |0-9]*$)#(?:星铁|星穹铁道|崩坏星穹铁道|崩铁|绝区零|绝区|原神)?[\\s\\S]{1,}(?:命座|星魂|影画|天赋)$",
+      reg: "^(?!#(?:今日|今天|每日|我的|明天|明日|周(?:[1-7]|一|二|三|四|五|六|日))*(?:素材|材料|天赋)[ |0-9]*(?:图鉴)?$)#(?:星铁|星穹铁道|崩坏星穹铁道|崩铁|绝区零|绝区|原神)?[\\s\\S]{1,}(?:命座|星魂|影画|天赋)(?:图鉴)?$",
       fnc: "shortcutQuery",
     },
     {
@@ -317,12 +371,7 @@ function composeAtlasRules(shortcutRules = []) {
       fnc: "shortcutQuery",
     },
     {
-      reg: "^(?![#*%％]?(?:星铁|星穹铁道|崩坏星穹铁道|崩铁|绝区零|绝区|原神)?(?:日历|日历列表)\\d{0,3}$)(?!#(?:今日|今天|每日|我的|明天|明日|周(?:[1-7]|一|二|三|四|五|六|日))*(?:素材|材料|天赋)[ |0-9]*$)(?![#*%％]?(?:星铁|绝区零|原神)?(?:锅巴登录|体力|树脂|便笺|便签|多体力|全部体力|更新面板|面板更新|更新抽卡记录|刷新抽卡记录|全部记录|角色记录|武器记录|常驻记录|新手记录|抽卡记录|刷新cookie|扫码登录|米哈游登录|账号密码登录|密码登录|登录帮助|签到|注册自动签到|远程|spawn|上传|下载|B站|BBDown|帮助|菜单|命令|版本|状态|深渊|深境螺旋|幻想|幻想真境剧诗|剧诗|幽境|危战|幽境危战|混沌|混沌回忆|忘却|忘却之庭|末日|末日幻影|虚构|虚构叙事|异相|异相仲裁|防卫|防卫战|式舆|式舆防卫|式舆防卫战|危局|危局强袭战|强袭|强袭战)\\d{0,3}$)(?![#*%％]?(?:星铁|星穹铁道|崩坏星穹铁道|崩铁|绝区零|绝区|原神)?(?:最强|极限)[\\s\\S]*$)(?![#*%％]?[\\s\\S]*(?:面板|面版)(?:[1-9]|[1-9]\\d|1\\d\\d|2[0-4]\\d|25[0-5])?$)(?![#*%％]?[\\s\\S]*(?:练度统计|天赋统计|技能统计|角色查询|查询角色|角色列表|面板角色|角色面板|深渊|深境|深境螺旋|幻想|幻境|剧诗|幻想真境剧诗|幽境|危战|幽境危战|混沌|混沌回忆|忘却|忘却之庭|虚构|虚构叙事|末日|末日幻影|异相|异相仲裁|防卫|防卫战|式舆|危局|强袭|临界|推演|爬塔|月报|菲林|邦布券|收入|探索|探索度|个人信息|卡片|card)\\s*(?:[1-9]|[1-9]\\d|1\\d\\d|2[0-4]\\d|25[0-5])$)(?![#*%％]?[\\s\\S]*(?:面板|面版)\\s*[\\s\\S]*[换变改][\\s\\S]*$)(?![#*%％]?[\\s\\S]*(?:排名|排行|排行榜)$)(?:#[\\s\\S]{2,}|\\*[\\s\\S]{2,}|[%％][\\s\\S]{2,})$",
-      fnc: "shortcutQuery",
-      log: false,
-    },
-    {
-      reg: "^[^#*%\\s][\\s\\S]{1,}(?:命座|星魂|影画|天赋)$",
+      reg: "^[^#*%\\s][\\s\\S]{1,}(?:命座|星魂|影画|天赋)(?:图鉴)?$",
       fnc: "shortcutQuery",
       log: false,
     },
@@ -335,6 +384,20 @@ async function renderAtlasSearchResult(result, userId) {
   return renderTemplate(selectAtlasTemplate(renderData), renderData, {
     saveId: `lotus-atlas-${userId || "user"}`,
   })
+}
+
+export async function sendAtlasSearchResult(target, result, options = {}) {
+  const data = buildAtlasRenderData(result)
+  if (selectAtlasTemplate(data) === "atlas-item" && data.view) {
+    const images = await (options.renderBook || renderAtlasBook)(data, { saveId: `lotus-atlas-${target.e?.user_id || "user"}` })
+    // Every character suffix produces the complete book, with one image per node.
+    if (data.view.kind === "character" || images.length > 1) {
+      const sections = [...new Set(images.map(image => image.section))]
+      return replyForward(target, [`${data.title}完整图鉴\n${sections.join(" → ")}\n共 ${images.length} 页`, ...images.map(image => image.image)], { description: `${data.title} · ${data.view.kind === "character" ? "完整角色图鉴" : "图鉴资料"}` })
+    }
+    return replyImage(target, images[0]?.image, "[荷花插件]图鉴查询完成。")
+  }
+  return replyImage(target, await renderAtlasSearchResult(result, target.e?.user_id), result.ok ? "[荷花插件]图鉴查询完成。" : "[荷花插件]没有找到图鉴结果。")
 }
 
 async function renderAtlasUpdateResult(result, userId) {

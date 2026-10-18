@@ -4,6 +4,8 @@ const NOTIFY_PREFERS = new Set(["private", "group"])
 const PYTHON_MODES = new Set(["venv", "system"])
 const PERMISSION_POLICIES = new Set(["allow", "deny", "inherit", "master_only"])
 const BILI_MULTI_PAGE_POLICIES = new Set(["zip", "all", "first"])
+// 与 core/render/theme.js 的 THEME_NAMES 保持一致（主题真源侧另有兜底：未知值回落 crystal）
+const THEME_NAMES = ["crystal", "mist", "saas", "ice", "aurora", "dawn", "light", "glass", "dark", "abyss", "tide"]
 
 export function validateProfile(profile) {
   const errors = []
@@ -53,13 +55,16 @@ export function validateGlobalConfig(config) {
   }
 
   validateRenderConfig(config.render, errors)
+  validateModulesConfig(config.modules, errors)
   validateGlobalScheduler(config.scheduler, errors)
   validateCaptchaConfig(config.captcha, errors)
   validatePythonConfig(config.python, errors)
   validateToolsConfig(config.tools, errors)
   validateRemoteConfig(config.remote, errors)
   validateBilibiliConfig(config.bilibili, errors)
+  validateDouyinConfig(config.douyin, errors)
   validateGroupsConfig(config.groups, errors)
+  if (!isObject(config.tuneweave) || !isString(config.tuneweave.api_url) || !isPositiveInteger(config.tuneweave.request_timeout_ms)) errors.push("tuneweave requires api_url and positive request_timeout_ms")
   validateNeteasePartnerConfig(config.netease_partner, errors)
   validateLoggingConfig(config.logging, errors)
   validateAtlasConfig(config.atlas, errors)
@@ -157,8 +162,22 @@ function validateRenderConfig(render = {}, errors) {
     errors.push("render.background must be a string or string array")
   }
   if (!isString(render.theme_color)) errors.push("render.theme_color must be a string")
+  if (typeof render.theme !== "undefined" && !THEME_NAMES.includes(String(render.theme))) {
+    errors.push(`render.theme must be one of: ${THEME_NAMES.join(", ")}`)
+  }
   if (!isPositiveInteger(render.background_timeout_ms)) {
     errors.push("render.background_timeout_ms must be a positive integer")
+  }
+}
+
+function validateModulesConfig(modules = {}, errors) {
+  if (typeof modules === "undefined" || modules === null) return
+  if (!isObject(modules)) {
+    errors.push("modules must be an object")
+    return
+  }
+  for (const [key, value] of Object.entries(modules)) {
+    if (typeof value !== "boolean") errors.push(`modules.${key} must be a boolean`)
   }
 }
 
@@ -269,6 +288,24 @@ function validateCaptchaConfig(captcha = {}, errors) {
   }
   validateProvider(captcha.gtmanual, "captcha.gtmanual", errors, ["address", "verify_addr"])
   validateProvider(captcha.vision_ai, "captcha.vision_ai", errors, ["api", "key"])
+  validateLuluPlaoProvider(captcha.lulu_plao, errors)
+}
+
+function validateLuluPlaoProvider(provider = {}, errors) {
+  if (!isObject(provider)) {
+    errors.push("captcha.lulu_plao must be an object")
+    return
+  }
+  if (typeof provider.enable !== "boolean") errors.push("captcha.lulu_plao.enable must be boolean")
+  if (!["lulu", "plao"].includes(provider.provider)) {
+    errors.push("captcha.lulu_plao.provider must be lulu/plao")
+  }
+  for (const field of ["lulu_url", "lulu_token", "plao_url", "plao_token"]) {
+    if (!isString(provider[field])) errors.push(`captcha.lulu_plao.${field} must be a string`)
+  }
+  if ("timeout_ms" in provider && !isPositiveInteger(provider.timeout_ms)) {
+    errors.push("captcha.lulu_plao.timeout_ms must be a positive integer")
+  }
 }
 
 function validateProvider(provider = {}, prefix, errors, stringFields = []) {
@@ -360,7 +397,7 @@ function validateBilibiliConfig(bilibili = {}, errors) {
     errors.push("bilibili.download must be an object")
     return
   }
-  for (const field of ["enable", "use_aria2", "cache_enable"]) {
+  for (const field of ["enable", "use_aria2"]) {
     if (typeof bilibili.download[field] !== "boolean") {
       errors.push(`bilibili.download.${field} must be boolean`)
     }
@@ -378,7 +415,7 @@ function validateBilibiliConfig(bilibili = {}, errors) {
       errors.push(`bilibili.download.${field} must be a positive integer`)
     }
   }
-  for (const field of ["max_estimated_size_mb", "cache_ttl_seconds"]) {
+  for (const field of ["max_estimated_size_mb"]) {
     if (!isNonNegativeInteger(bilibili.download[field])) {
       errors.push(`bilibili.download.${field} must be a non-negative integer`)
     }
@@ -389,6 +426,22 @@ function validateBilibiliConfig(bilibili = {}, errors) {
   if (!Array.isArray(bilibili.download.extra_args) || !bilibili.download.extra_args.every(isString)) {
     errors.push("bilibili.download.extra_args must be an array of strings")
   }
+}
+
+function validateDouyinConfig(config = {}, errors) {
+  if (!isObject(config)) { errors.push("douyin must be an object"); return }
+  if (typeof config.enable !== "boolean") errors.push("douyin.enable must be boolean")
+  if (!isPositiveInteger(config.request_timeout_ms)) errors.push("douyin.request_timeout_ms must be a positive integer")
+  const download = config.download
+  if (!isObject(download)) { errors.push("douyin.download must be an object"); return }
+  if (typeof download.enable !== "boolean") errors.push("douyin.download.enable must be boolean")
+  if (!isString(download.tools_path)) errors.push("douyin.download.tools_path must be a string")
+  if (!["adapt", "4k", "2k", "1080p", "720p", "540p", "360p"].includes(download.quality)) errors.push("douyin.download.quality is invalid")
+  if (!["first", "all", "zip"].includes(download.multi_page_policy)) errors.push("douyin.download.multi_page_policy is invalid")
+  for (const field of ["duration_limit_seconds", "video_size_limit_mb", "timeout_ms"]) {
+    if (!isPositiveInteger(download[field])) errors.push(`douyin.download.${field} must be a positive integer`)
+  }
+  if (!isNonNegativeInteger(download.max_estimated_size_mb)) errors.push("douyin.download.max_estimated_size_mb must be a non-negative integer")
 }
 
 function validateGroupsConfig(groups = {}, errors) {
@@ -419,7 +472,7 @@ function validateNeteasePartnerConfig(netease = {}, errors) {
     return
   }
   if (typeof netease.enable !== "boolean") errors.push("netease_partner.enable must be boolean")
-  for (const field of ["api_url", "schedule"]) {
+  for (const field of ["schedule"]) {
     if (!isString(netease[field])) errors.push(`netease_partner.${field} must be a string`)
   }
   for (const field of ["login_timeout_ms", "login_poll_ms", "delay_ms_min", "delay_ms_max"]) {
@@ -460,7 +513,7 @@ function validateAtlasConfig(atlas = {}, errors) {
     if (typeof atlas[field] !== "boolean") errors.push(`atlas.${field} must be boolean`)
   }
   if (!isPositiveInteger(atlas.max_results)) errors.push("atlas.max_results must be a positive integer")
-  for (const field of ["initial_args", "update_args", "version_args"]) {
+  for (const field of ["initial_args", "update_args", "challenge_args", "version_args"]) {
     if (!Array.isArray(atlas[field]) || !atlas[field].every(isString)) {
       errors.push(`atlas.${field} must be an array of strings`)
     }
@@ -472,6 +525,7 @@ function validateAtlasConfig(atlas = {}, errors) {
   } else {
     if (typeof atlas.auto_update.enable !== "boolean") errors.push("atlas.auto_update.enable must be boolean")
     if (!isString(atlas.auto_update.check_cron)) errors.push("atlas.auto_update.check_cron must be a string")
+    if (!isString(atlas.auto_update.challenge_cron)) errors.push("atlas.auto_update.challenge_cron must be a string")
     if (typeof atlas.auto_update.run_on_missing_data !== "boolean") {
       errors.push("atlas.auto_update.run_on_missing_data must be boolean")
     }

@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process"
 import { rootPath } from "../../core/path.js"
+import { notifyUser } from "../../core/transport/notify.js"
 
 const DEFAULT_OUTPUT_LIMIT = 12000
+const GIT_STATUS_ARGS = ["status", "--short", "--ignore-submodules=dirty"]
 
 export async function checkPluginUpdate(options = {}) {
   const {
@@ -12,14 +14,16 @@ export async function checkPluginUpdate(options = {}) {
     runner = runGit,
   } = options
 
-  const status = await runner(["status", "--short"], { cwd, outputLimit })
-  const dirtyLines = splitLines(status.stdout)
+  const status = await runner(GIT_STATUS_ARGS, { cwd, outputLimit })
+  const dirtyState = partitionDirtyStatus(splitStatusLines(status.stdout))
+  const dirtyLines = dirtyState.blocking
   if (dirtyLines.length) {
     return {
       ok: false,
       action: "blocked_dirty",
       message: "当前仓库存在未提交改动，已停止自动更新。",
       dirty: dirtyLines.slice(0, 12),
+      ignoredDirty: dirtyState.ignored.slice(0, 12),
     }
   }
 
@@ -79,6 +83,7 @@ export async function checkPluginUpdate(options = {}) {
       behind,
       commit: current,
       message: "本地分支领先上游，无需拉取。",
+      ignoredDirty: dirtyState.ignored.slice(0, 12),
     }
   }
   if (behind === 0) {
@@ -91,6 +96,7 @@ export async function checkPluginUpdate(options = {}) {
       behind,
       commit: current,
       message: "插件已是最新版本。",
+      ignoredDirty: dirtyState.ignored.slice(0, 12),
     }
   }
 
@@ -104,6 +110,7 @@ export async function checkPluginUpdate(options = {}) {
       behind,
       commit: current,
       message: `检测到上游有 ${behind} 个新提交。`,
+      ignoredDirty: dirtyState.ignored.slice(0, 12),
     }
   }
 
@@ -128,7 +135,142 @@ export async function checkPluginUpdate(options = {}) {
     previousCommit: current,
     message: `已 fast-forward 更新 ${behind} 个提交，请按需重启机器人。`,
     output: pullResult.stdout || pullResult.stderr,
+    ignoredDirty: dirtyState.ignored.slice(0, 12),
   }
+}
+
+export async function syncTrackedSubmodules(options = {}) {
+  const {
+    cwd = rootPath,
+    outputLimit = DEFAULT_OUTPUT_LIMIT,
+    runner = runGit,
+  } = options
+  const status = await runner(["submodule", "status", "--recursive"], {
+    cwd,
+    outputLimit,
+    allowFailure: true,
+  })
+  if (status.code !== 0) {
+    return {
+      ok: false,
+      action: "submodule_status_failed",
+      message: "无法读取子模块状态。",
+      detail: status.stderr || status.stdout,
+    }
+  }
+
+  const pending = splitLines(status.stdout).filter(line => /^[+\-U]/.test(line))
+  if (!pending.length) {
+    return {
+      ok: true,
+      action: "submodules_up_to_date",
+      message: "子模块提交已同步。",
+    }
+  }
+
+  const update = await runner(["submodule", "update", "--init", "--recursive"], {
+    cwd,
+    outputLimit,
+    allowFailure: true,
+  })
+  if (update.code !== 0) {
+    return {
+      ok: false,
+      action: "submodule_update_failed",
+      message: "子模块提交不匹配，但自动更新失败。",
+      pending,
+      detail: update.stderr || update.stdout,
+    }
+  }
+  return {
+    ok: true,
+    action: "submodules_updated",
+    message: "已同步子模块追踪的提交。",
+    pending,
+  }
+}
+
+/**
+ * Check whether tracked submodules have commits newer than the parent pointer.
+ * This is intentionally read/notify-only: startup must never rewrite the checkout.
+ */
+export async function checkTrackedSubmoduleRemoteUpdates(options = {}) {
+  const {
+    cwd = rootPath,
+    outputLimit = DEFAULT_OUTPUT_LIMIT,
+    runner = runGit,
+    notify = true,
+    config = {},
+  } = options
+
+  const listed = await runner(["submodule", "status", "--recursive"], {
+    cwd,
+    outputLimit,
+    allowFailure: true,
+  })
+  if (listed.code !== 0) {
+    return { ok: false, action: "submodule_status_failed", updates: [], message: "无法读取子仓库状态。" }
+  }
+
+  const updates = []
+  for (const line of splitLines(listed.stdout)) {
+    const match = line.match(/^[+\-U]?([0-9a-f]+)\s+([^\s]+)/i)
+    if (!match) continue
+    const submodulePath = match[2]
+    const submoduleCwd = pathJoin(cwd, submodulePath)
+    const remote = await runner(["remote", "update", "--prune"], {
+      cwd: submoduleCwd,
+      outputLimit,
+      allowFailure: true,
+    })
+    if (remote.code !== 0) continue
+    const head = await runner(["rev-parse", "HEAD"], { cwd: submoduleCwd, outputLimit, allowFailure: true })
+    const upstream = await runner(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "origin/HEAD"], {
+      cwd: submoduleCwd,
+      outputLimit,
+      allowFailure: true,
+    })
+    if (head.code !== 0 || upstream.code !== 0) continue
+    const counts = await runner(["rev-list", "--left-right", "--count", `HEAD...${upstream.stdout.trim()}`], {
+      cwd: submoduleCwd,
+      outputLimit,
+      allowFailure: true,
+    })
+    const [ahead, behind] = parseAheadBehind(counts.stdout)
+    if (behind > 0) updates.push({ path: submodulePath, ahead, behind, head: head.stdout.trim().slice(0, 12), upstream: upstream.stdout.trim() })
+  }
+
+  const result = {
+    ok: true,
+    action: updates.length ? "submodules_behind_remote" : "submodules_current",
+    updates,
+    message: updates.length ? `检测到 ${updates.length} 个子仓库有未同步提交。` : "子仓库均已同步到远端。",
+  }
+  if (notify && updates.length) await notifySubmoduleUpdates(updates, config)
+  return result
+}
+
+async function notifySubmoduleUpdates(updates, config = {}) {
+  const masters = collectMasterIds(config)
+  if (!masters.length) return
+  const lines = updates.map(item => `- ${item.path}: 落后 ${item.behind} 个提交（当前 ${item.head}）`)
+  const message = `[荷花插件]开机检测发现子仓库未同步：\n${lines.join("\n")}\n请手动更新并检查主项目引用的 commit。`
+  for (const master of masters) {
+    await notifyUser(master, message, { prefer: "private", onlyKnownFriend: false }).catch(error => {
+      globalThis.logger?.warn?.(`[Lotus-Plugin] submodule update notification failed: ${error.message}`)
+    })
+  }
+}
+
+function collectMasterIds(config = {}) {
+  const values = [config.masterQQ, config.master, config.master_qq, config.masters]
+  const runtime = globalThis.Bot?.config || globalThis.Bot?.cfg || {}
+  values.push(runtime.masterQQ, runtime.master, runtime.master_qq)
+  return [...new Set(values.flatMap(value => Array.isArray(value) ? value : [value]).map(String).filter(Boolean))]
+}
+
+function pathJoin(base, child) {
+  return `${String(base).replace(/[\\/]$/, "")}/${String(child).replace(/\\/g, "/")}`
 }
 
 export function runGit(args, options = {}) {
@@ -186,6 +328,30 @@ function parseAheadBehind(output = "") {
 
 function splitLines(text = "") {
   return String(text || "").split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+}
+
+function splitStatusLines(text = "") {
+  return String(text || "").split(/\r?\n/).filter(line => line.trim())
+}
+
+function partitionDirtyStatus(lines = []) {
+  const ignored = []
+  const blocking = []
+  for (const line of lines) {
+    if (isIgnoredDirtyStatus(line)) ignored.push(line.trim())
+    else blocking.push(line.trim())
+  }
+  return { blocking, ignored }
+}
+
+function isIgnoredDirtyStatus(line = "") {
+  const normalized = String(line || "").replace(/\\/g, "/")
+  const code = normalized.slice(0, 2)
+  const file = normalized.slice(3).trim()
+  if (file === "services/starRailTeamDamage/data/system-data.json") return true
+  if (file === "test_nine" && /[m?]/.test(code)) return true
+  if (file.startsWith("test_nine/") && code.includes("?")) return true
+  return false
 }
 
 function appendLimited(current, chunk, limit) {

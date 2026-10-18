@@ -1,6 +1,7 @@
 import crypto from "node:crypto"
 import { deviceHeaders } from "../../core/devices/service.js"
 import { getDs2 } from "../../core/mihoyo/ds.js"
+import { starRailCharacterName } from "../../core/mihoyo/starrailCharacters.js"
 import { isCnServer, resolveServer } from "../../core/mihoyo/regions.js"
 import { getRoleUid, pickRole } from "../pluginBridge/common.js"
 
@@ -110,24 +111,17 @@ export class StarRailChallengeService {
       scheduleType,
     }
 
-    let res = null
-    let simple = Boolean(parsed.simple)
-    if (!simple) {
-      res = await this.requestChallenge({ ...requestOptions, detailed: true })
-      if (!isOkResponse(res)) simple = true
-    }
-    if (simple) {
-      const simpleRes = await this.requestChallenge({ ...requestOptions, detailed: false })
-      if (!isOkResponse(simpleRes)) throw mihoyoResponseError(simpleRes, meta.label)
-      res = simpleRes
-    }
+    // 【精装版】只走详细请求（need_all=true），不再降级简易：
+    // 详细接口失败直接抛错出失败卡，避免渲染出缺关卡的残缺卡片。
+    const res = await this.requestChallenge({ ...requestOptions, detailed: true })
+    if (!isOkResponse(res)) throw mihoyoResponseError(res, meta.label)
 
     return normalizeChallengeResult({
       data: res.data || {},
       uid,
       meta,
       scheduleType,
-      simple,
+      simple: false,
       recent: parsed.recent,
       currentType: TYPE_META[currentChallengeKind()].index,
     })
@@ -203,14 +197,14 @@ export function buildStarRailChallengeRenderData({ uid, profileId, command, pars
     title,
     subtitle: `UID ${uid} · profile ${profileId}`,
     badge: "SR",
-    message: `${command || parsed?.normalized || ""} · ${period}${parsed?.simple ? " · 简易" : ""}`,
+    message: `${command || parsed?.normalized || ""} · ${period}`,
     uid,
     profileId,
     summary: [
       { label: "UID", value: String(uid || "") },
       { label: "Profile", value: String(profileId || 1) },
       { label: "查询", value: command || parsed?.normalized || "" },
-      { label: "模式", value: parsed?.simple ? "简易" : "详细优先" },
+      { label: "模式", value: "详细" },
     ],
     results: results || [],
   }
@@ -370,7 +364,8 @@ function formatPeakRecord(record = {}, root = {}) {
 
 function formatAvatar(avatar = {}) {
   return {
-    name: avatar.name_mi18n || avatar.name || "",
+    id: avatar.id ?? avatar.avatar_id ?? "",
+    name: avatar.name_mi18n || avatar.name || starRailCharacterName(avatar.id ?? avatar.avatar_id),
     icon: avatar.icon || "",
     rarity: avatar.rarity || "",
     rank: avatar.rank ?? "",

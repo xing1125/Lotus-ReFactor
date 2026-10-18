@@ -1,31 +1,22 @@
-# 体力、面板、抽卡
+# 个人查询总览
 
-## 体力
+返回：[项目主页](../README.md) / [文档目录](README.md)
 
-- `#全部体力`
-- `#全部体力2`
-- `#体力2`
-- `*体力2`
-- `%体力2`
-- `#星铁体力2`
-- `#绝区零体力2`
+个人查询模块按 profile 和 UID 处理原神、星铁、绝区零数据。所有入口都避免把 profile 序号当作游戏 UID；UID 仍按 8-10 位游戏 UID 处理。
 
-`#全部体力` 会收集当前 QQ 所有 profile、所有游戏、所有 UID。单个 UID 失败不会中断其他 UID。
+## 小功能
 
-星铁派遣按官方新字段显示，不再使用旧派遣字段。
+- [体力查询-原神、星铁、绝区零](features/daily-note.md)
+- [面板查询-原神、星铁、绝区零](features/panel-query.md)
+- [战绩查询-原神、绝区零](features/record-query-genshin-zzz.md)
+- [战绩查询-星铁](features/record-query-starrail.md)
+- [抽卡记录-原神、星铁、绝区零](features/gacha-log.md)
+- [队伍伤害-原神](features/team-damage-genshin.md)
+- [队伍伤害-星铁](features/team-damage-starrail.md)
+- [挑战查询-图鉴期数](features/challenge-query.md)
 
-## 面板
+## 使用方式
 
-- `#更新面板2`
-- `*更新面板2`
+所有个人查询都支持 profile 后缀。没有后缀时使用 profile 1；带后缀时只使用指定 profile 的登录态和 UID。
 
-按 profile 选择登录态和 UID，再构造一次性事件上下文转交 miao/genshin 底层逻辑。
-
-## 抽卡记录
-
-- `#更新抽卡记录2`
-- `*更新抽卡记录2`
-- `%更新抽卡记录2`
-- `#更新全部抽卡记录`
-
-原神/星铁通过 profile 的 stoken 生成 authkey。绝区零优先 CK 直刷，只有获取抽卡链接时才走 authkey。
+完整命令语法见各小功能页和 [指令索引](commands.md)。

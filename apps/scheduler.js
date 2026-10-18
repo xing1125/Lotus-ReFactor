@@ -1,4 +1,5 @@
 const BasePlugin = globalThis.plugin
+import { accountDisplay } from "../services/checkin/account.js"
 
 import { loadGlobalConfig, saveGlobalConfig } from "../core/config/global.js"
 import { listProfileIds, loadProfile } from "../core/config/profile.js"
@@ -126,7 +127,7 @@ export class LotusScheduler extends BasePlugin {
     }
     const image = await renderSchedulePlan({ ...plan, entries }, {
       title: "我的签到时间",
-      subtitle: `${date} · QQ ${userId}`,
+      subtitle: `${date} · ${accountDisplay(String(userId))}`,
       userId,
     })
     await replyImage(this, image, "[荷花插件]这是你明日的签到时间。")
@@ -217,7 +218,7 @@ export class LotusScheduler extends BasePlugin {
       message: result.count ? "已执行所有到期且未完成的签到任务，结果会分别通知对应用户。" : "当前没有到期且未完成的签到任务。",
       userId: this.e.user_id,
       items: result.results.slice(0, 8).map(({ entry, outcome }) => ({
-        label: `QQ ${entry.qq} · P${entry.profileId}`,
+        label: `${accountDisplay(String(entry.qq))} · P${entry.profileId}`,
         value: `${outcome.ok ? "成功" : "失败"} · ${outcome.stage}`,
       })),
     }, {
