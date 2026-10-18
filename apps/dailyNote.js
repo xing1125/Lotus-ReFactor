@@ -39,11 +39,12 @@ export class LotusDailyNote extends BasePlugin {
         },
         {
           reg: `^#体力${PROFILE_ID_SUFFIX_PATTERN}$`,
-          fnc: "genshinDailyNote",
+          fnc: "allDailyNote",
         },
         {
+          // 裸「体力/便笺」等 = jj 模式：原神 + 星铁 + 绝区零 一起出
           reg: `^#?(体力|树脂|查询体力|便笺|便签)${PROFILE_ID_SUFFIX_PATTERN}$`,
-          fnc: "genshinDailyNote",
+          fnc: "allDailyNote",
         },
         {
           reg: `^#原神(体力|树脂|便笺|便签)${PROFILE_ID_SUFFIX_PATTERN}$`,
@@ -229,20 +230,8 @@ export class LotusDailyNote extends BasePlugin {
     const hasSuffix = /\d+$/.test(String(this.e.msg || ""))
     const profileId = hasSuffix ? parseProfileIdFromMessage(this.e.msg) : null
 
-    // jj 交互格式：先发一条 @ 文本（带全部已同步 UID + 「查询中请稍等...」），@ 全程只出现这一次
-    const uids = []
-    const profileIds = profileId ? [profileId] : await listProfileIds(userId).catch(() => [])
-    for (const pid of profileIds) {
-      const profile = await loadProfile(userId, pid).catch(() => null)
-      for (const game of games) {
-        const roles = normalizeRoles(profile?.account?.game_roles?.[game])
-        for (const role of roles) {
-          const uid = String(role.uid || role.game_uid || role)
-          if (uid && !uids.includes(uid)) uids.push(uid)
-        }
-      }
-    }
-    await replyText(this, `${uids.length ? uids.join(" ") + " " : ""}查询中`, { at: true })
+    // jj 短格式：单条 @ 等待提示（不带 UID），@ 全程只出现这一次
+    await replyText(this, "查询中请稍等", { at: true })
 
     const service = new DailyNoteService()
     const results = await service.collect({
