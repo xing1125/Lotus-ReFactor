@@ -159,7 +159,7 @@ export class LotusCheckin extends BasePlugin {
     }
 
     // jj 短格式：单条 @ 等待提示，随后静默执行，仅出结果图
-    await replyText(this, "签到中", { at: true })
+    await replyText(this, "签到中请稍后", { at: true })
 
     // 多账号时跳过每个 profile 的单卡渲染（省一次无用的渲染，最终只出合并卡）
     const multi = entries.filter(entry => entry.profile).length > 1
