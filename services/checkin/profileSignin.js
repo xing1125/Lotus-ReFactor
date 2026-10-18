@@ -130,7 +130,8 @@ export class ProfileSigninService {
 }
 
 export async function renderSigninResult({ result, profile, skipped, forcedDisables = {} }) {
-  const message = String(result.message || "无详细结果").slice(0, 180)
+  // 成功卡不再传 message：底部 messageBlock 会把 MihoyoBBSTools 的长日志整段画出来，
+  // 把卡拉得过长（用户反馈「太长了下面的就不用显示了」）；失败卡仍保留排查建议。
   // 先抽立绘，再同时用作背景与（微信无头像时的）头像回退
   const illustration = getRandomCharacter()
 
@@ -139,9 +140,7 @@ export async function renderSigninResult({ result, profile, skipped, forcedDisab
     subtitle: `profile ${profile.profile?.id || 1}`,
     nickname: resolveDisplayName(profile),
     account: `profile ${profile.profile?.id || 1}`,
-    description: message,
     badge: result.ok ? "成功" : "失败",
-    message,
     illustration,
     // 微信等拿不到真实头像时，复用同一张立绘作为头像，与背景保持协调
     avatar: accountAvatar(profile.user?.qq, profile.user?.platform, illustration),
@@ -149,6 +148,35 @@ export async function renderSigninResult({ result, profile, skipped, forcedDisab
     games: buildSigninRows(profile, result,  skipped, forcedDisables),
   }, {
     saveId: `lotus-checkin-${profile.user?.qq || "user"}-${profile.profile?.id || 1}`,
+  })
+}
+
+// 多账号合并卡（jj 对齐）：一次「#签到」跑该用户全部 profile，结果汇总到一张卡，
+// 每个 profile 一个小节（金标账号名 + 右侧状态胶囊 + 游戏状态表）。
+// entries: [{ profileId, outcome?, error? }] —— outcome 为服务返回值；error 为未配置/未登录等前置失败。
+export async function renderSigninMulti({ userId, entries }) {
+  const firstProfile = entries.find(entry => entry.outcome?.profile)?.outcome.profile
+  const illustration = getRandomCharacter()
+  const title = firstProfile ? resolveDisplayName(firstProfile) : accountDisplay(userId)
+  const allOk = entries.length > 0 && entries.every(entry => entry.outcome?.ok)
+  return renderTemplate("checkin-result", {
+    title,
+    subtitle: `${entries.length} 个账号`,
+    badge: allOk ? "成功" : "部分失败",
+    illustration,
+    avatar: accountAvatar(userId, firstProfile?.user?.platform, illustration),
+    userId,
+    sections: entries.map(entry => {
+      const games = entry.outcome?.games || []
+      return {
+        label: `账号 ${entry.profileId}${entry.outcome?.profile ? ` · ${resolveDisplayName(entry.outcome.profile)}` : ""}`,
+        badge: entry.outcome ? (entry.outcome.ok ? "成功" : "失败") : "未执行",
+        games,
+        note: games.length ? "" : (entry.outcome?.message || entry.error || "未执行"),
+      }
+    }),
+  }, {
+    saveId: `lotus-checkin-multi-${userId || "user"}`,
   })
 }
 
