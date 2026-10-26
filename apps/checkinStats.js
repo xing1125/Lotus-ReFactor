@@ -9,6 +9,7 @@ import { SchedulerService, dateString } from "../core/scheduler/service.js"
 import { listAllProfiles } from "../core/config/profile.js"
 import { accountLabel } from "../services/checkin/account.js"
 import { buildCheckinStatsData } from "../services/checkin/statsBuilder.js"
+import { accountDisplay } from "../services/checkin/account.js"
 
 // 实时签到人数看板指令（git untracked，git pull 安全）
 //
@@ -72,7 +73,7 @@ export class LotusCheckinStats extends BasePlugin {
       title: "实时签到看板",
       subtitle: `${date} · 共 ${knownGroups.length} 个群 · ${totalDone}/${totalAll} 已签`,
       badge: "STATS",
-      message: `触发人 ${triggerId || "BOT主人"}`,
+      message: `触发人 ${accountDisplay(triggerId) || "BOT主人"}`,
       summary,
       groups,
     }, { saveId: `lotus-checkin-stats-${triggerId || "master"}` })

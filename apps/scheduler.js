@@ -8,6 +8,7 @@ import { SchedulerService, cronToMinuteOfDay, nextDateString } from "../core/sch
 import { renderStatusCard } from "../core/render/service.js"
 import { replyImage, replyText } from "../core/transport/reply.js"
 import { ScheduledSigninService } from "../services/checkin/scheduled.js"
+import { AutoResignService } from "../services/checkin/autoResign.js"
 import {
   applySchedulerSettings,
   describeSchedulerSettings,
@@ -48,6 +49,12 @@ export class LotusScheduler extends BasePlugin {
         fnc: this.catchUpTomorrowPlanTask.bind(this),
         log: false,
       },
+      {
+        name: "荷花插件自动补签",
+        cron: "0 0 12 * * ? *",
+        fnc: this.autoResignTask.bind(this),
+        log: false,
+      },
     ]
   }
 
@@ -71,6 +78,12 @@ export class LotusScheduler extends BasePlugin {
           name: "荷花插件签到计划补偿检查",
           cron: globalConfig.scheduler?.catch_up_cron || "0 */10 * * * ? *",
           fnc: this.catchUpTomorrowPlanTask.bind(this),
+          log: false,
+        },
+        {
+          name: "荷花插件自动补签",
+          cron: globalConfig.scheduler?.auto_resign?.cron || "0 0 12 * * ? *",
+          fnc: this.autoResignTask.bind(this),
           log: false,
         },
       ]
@@ -262,8 +275,21 @@ export class LotusScheduler extends BasePlugin {
     return true
   }
 
-  async runDueCheckins(options = {}) {
+  // 自动补签：对当日签到失败的条目自动重试一次（黑名单过滤登录失效类，成功才通知）。
+  // 详细约束见 services/checkin/autoResign.js 头注释。
+  async autoResignTask(options = {}) {
     const globalConfig = await loadGlobalConfig()
+    if (globalConfig.scheduler?.enable === false) {
+      return { ok: true, disabled: true }
+    }
+    const cfg = globalConfig.scheduler?.auto_resign || {}
+    if (cfg.enable === false) {
+      return { ok: true, disabled: true, reason: "auto_resign_disabled" }
+    }
+    return new AutoResignService({ bot: globalThis.Bot }).run({ config: globalConfig, ...options })
+  }
+
+  async runDueCheckins(options = {}) {    const globalConfig = await loadGlobalConfig()
     if (globalConfig.scheduler?.enable === false) {
       return {
         ok: true,
@@ -276,9 +302,8 @@ export class LotusScheduler extends BasePlugin {
     const result = await new ScheduledSigninService({
       scheduler: new SchedulerService({ config: globalConfig.scheduler }),
     }).runDue(options)
-    if (result.count) {
-      logger?.mark?.(`[Lotus-Plugin] scheduled checkin executed: ${result.count}`)
-    }
+    // 执行结果日志已移至 ScheduledSigninService.runDue（仅发起方打印），
+    // 这里不再重复打印，避免单飞锁共享等待时同一结果刷屏 N 条
     return result
   }
 }

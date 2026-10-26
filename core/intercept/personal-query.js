@@ -10,7 +10,7 @@ const SR_CHALLENGE_WORDS = "(?:深渊|忘却|忘却之庭|混沌|混沌回忆|�
 export const PERSONAL_QUERY_RULES = Object.freeze([
   { reg: `^#(?:星铁|原神)?(?:面板角色|角色面板|面板)(?:列表)?\\s*${P}$`, fnc: "miaoProfileList" },
   { reg: `^\\*(?:面板角色|角色面板|面板)(?:列表)?\\s*${P}$`, fnc: "miaoProfileList" },
-  { reg: `^#(?!(?:zzz|ZZZ|绝区零))(?!(?:原神|星铁)?(?:更新面板|面板更新|全部面板更新|更新全部面板))[\\s\\S]{1,}(?:详细|详情|面板|面版|圣遗物|遗器|武器|伤害)\\s*${P}$`, fnc: "miaoProfileDetail" },
+  { reg: `^#(?!(?:zzz|ZZZ|绝区零))(?!(?:原神|星铁)?(?:更新面板|面板更新|全部面板更新|更新全部面板))(?!(?:ww|WW|鸣潮))(?![\\s\\S]*导出面板)[\\s\\S]{1,}(?:详细|详情|面板|面版|圣遗物|遗器|武器|伤害)\\s*${P}$`, fnc: "miaoProfileDetail" },
   { reg: `^\\*(?!更新|面板更新|全部面板更新|更新全部面板)[\\s\\S]{1,}(?:详细|详情|面板|面版|遗器|武器|伤害)\\s*${P}$`, fnc: "miaoProfileDetail" },
   { reg: `^#(?:星铁|原神)?(?:面板|喵喵)?练度统计\\s*${P}$`, fnc: "miaoProfileStat" },
   { reg: `^\\*(?:面板|喵喵)?练度统计\\s*${P}$`, fnc: "miaoProfileStat" },

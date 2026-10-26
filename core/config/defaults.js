@@ -21,6 +21,23 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
   // 功能模块开关（锅巴「功能开关」）：键 = core/config/modules.js 注册表 id。
   // 缺省 / true = 启用；显式 false = 关闭（命令回复提示并吞掉）。签到链路走 scheduler.* 独立开关，不在此列。
   modules: {},
+  // 命令路由（锅巴「命令路由」）：控制荷花查询类模块的拦截优先级。
+  // 签到链路（体力/签到/社区签到/自动签到/扫码登录/签到设置/验证码）固定走 -Infinity，不由此处控制。
+  // query_priority：查询类模块的 priority，数值越小越先；默认 5001 = 排在 miao / ZZZ / Atlas 的 5000 之后，
+  //   由上游插件先接管、荷花兜底。设成负数可让荷花抢回最前。
+  // front_modules：需要无视上面数值、固定抢回最前（-Infinity）的模块 id 列表，id 取 core/config/modules.js。
+  routing: {
+    query_priority: 5001,
+    front_modules: [],
+  },
+  // 锅巴「快捷操作」：键 = guoba.actions.js 注册表 id。开关恒为 false 存储；
+  // 锅巴保存时从 关→开 = 触发一次执行，写回前复位为 false（见 guoba.support.js）。
+  // command_text：自定义指令文本（每行一条前台指令，关→开时逐条执行）。
+  // command_blacklist：指令黑名单（子串匹配，命中即拒绝；设为 [] = 放行全部）。
+  actions: {
+    command_text: "",
+    command_blacklist: ["更新图鉴", "远程"],
+  },
   render: {
     background: [
       "https://api.lvxiaodong.com/api/ys?return=json",
@@ -59,6 +76,13 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
       honkai_sr: false,
       zzz: false,
       mihoyobbs: false,
+    },
+    // 自动补签：每日定时对当日签到失败条目自动重试一次。
+    // 登录状态失效类失败不重试（黑名单见 services/checkin/autoResign.js）；成功才通知用户。
+    auto_resign: {
+      enable: true,
+      cron: "0 0 12 * * ? *",
+      notify_on_success: true,
     },
   },
   // 体力推送（移植自 ji-plugin note.js 的体力阈值推送）

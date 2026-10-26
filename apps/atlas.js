@@ -1,6 +1,6 @@
 const BasePlugin = globalThis.plugin
 
-import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
+import { resolvePriority } from "../core/intercept/priority.js"
 import { renderStatusCard, renderTemplate, renderAtlasBook } from "../core/render/service.js"
 import { replyImage, replyText, replyForward } from "../core/transport/reply.js"
 import { loadGlobalConfig } from "../core/config/global.js"
@@ -20,7 +20,7 @@ export class LotusAtlas extends BasePlugin {
       name: "[Lotus-Plugin] Atlas",
       dsc: "Lotus nanoka atlas query",
       event: "message",
-      priority: LOTUS_INTERCEPT_PRIORITY,
+      priority: resolvePriority("atlas"),
       rule: composeAtlasRules(),
     })
     this.shortcutRouteStats = { rules: 0 }

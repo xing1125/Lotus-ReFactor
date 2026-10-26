@@ -31,6 +31,8 @@ import { dateString } from "../core/scheduler/service.js"
 import { replyImage, replyText } from "../core/transport/reply.js"
 import { replyCaptchaEvent } from "../core/captcha/notify.js"
 import { ProfileSigninService } from "../services/checkin/profileSignin.js"
+import { applyOutcomesToPlan } from "../services/checkin/scheduled.js"
+import { emitCheckinLog } from "../core/checkinLog.js"
 
 const MAX_RETRY_PER_DAY = 3
 const COUNT_FILE = resolveData("resign-count.json")
@@ -107,10 +109,26 @@ export class LotusResignCheckin extends BasePlugin {
     }
 
     const outcomes = []
+    emitCheckinLog({ type: "resign-batch-start", qq: userId, message: `补签开始（${scope === "all" ? `全部 ${ids.length} 个 profile` : `profile ${profileId}`}）` })
     for (const id of ids) {
+      emitCheckinLog({ type: "signing", qq: userId, profileId: id, message: "补签开始" })
       const outcome = await this.runOne(userId, id)
+      emitCheckinLog({
+        type: "done",
+        qq: userId,
+        profileId: id,
+        ok: outcome.ok === true,
+        message: outcome.ok ? "补签成功" : (outcome.message || "补签失败"),
+      })
       outcomes.push({ profileId: id, outcome })
     }
+
+    // 把补签结果回写进当日计划条目，保证 #签到看板 / 主人汇总与实际一致
+    await applyOutcomesToPlan(outcomes.map(({ profileId, outcome }) => ({
+      qq: userId, profileId, outcome,
+    }))).catch(error => {
+      logger?.warn?.(`[Lotus-Plugin] 补签结果回写计划失败：${error?.message || error}`)
+    })
 
     // 单 profile：直接回传签到卡片
     if (scope !== "all") {

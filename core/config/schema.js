@@ -56,6 +56,8 @@ export function validateGlobalConfig(config) {
 
   validateRenderConfig(config.render, errors)
   validateModulesConfig(config.modules, errors)
+  validateRoutingConfig(config.routing, errors)
+  validateActionsConfig(config.actions, errors)
   validateGlobalScheduler(config.scheduler, errors)
   validateCaptchaConfig(config.captcha, errors)
   validatePythonConfig(config.python, errors)
@@ -181,6 +183,44 @@ function validateModulesConfig(modules = {}, errors) {
   }
 }
 
+// 命令路由（与其它插件抢同一个指令时，谁先接管）。
+// 缺省视为合法，只有显式写了才校验，避免旧配置在升级后校验失败。
+function validateRoutingConfig(routing, errors) {
+  if (typeof routing === "undefined" || routing === null) return
+  if (!isObject(routing)) {
+    errors.push("routing must be an object")
+    return
+  }
+  if ("query_priority" in routing && !Number.isFinite(Number(routing.query_priority))) {
+    errors.push("routing.query_priority must be a number")
+  }
+  if ("front_modules" in routing) {
+    if (!Array.isArray(routing.front_modules) || !routing.front_modules.every(isStringLike)) {
+      errors.push("routing.front_modules must be an array of module ids")
+    }
+  }
+}
+
+function validateActionsConfig(actions = {}, errors) {  if (typeof actions === "undefined" || actions === null) return
+  if (!isObject(actions)) {
+    errors.push("actions must be an object")
+    return
+  }
+  for (const [key, value] of Object.entries(actions)) {
+    // 动作开关（guoba.actions.js 注册表 id）必须是 boolean；
+    // 例外字段：command_text 字符串 / command_blacklist 数组（自定义指令支持，见 defaults.js）
+    if (key === "command_text") {
+      if (typeof value !== "string") errors.push("actions.command_text must be a string")
+      continue
+    }
+    if (key === "command_blacklist") {
+      if (!Array.isArray(value)) errors.push("actions.command_blacklist must be an array")
+      continue
+    }
+    if (typeof value !== "boolean") errors.push(`actions.${key} must be a boolean`)
+  }
+}
+
 function validateGlobalScheduler(scheduler = {}, errors) {
   if (!isObject(scheduler)) {
     errors.push("scheduler must be an object")
@@ -218,6 +258,24 @@ function validateGlobalScheduler(scheduler = {}, errors) {
     }
     if (typeof scheduler.late_registration.notify !== "boolean") {
       errors.push("scheduler.late_registration.notify must be boolean")
+    }
+  }
+
+  // 自动补签：宽松校验，缺省合法（缺省时走 defaults / 代码内默认值）
+  if (typeof scheduler.auto_resign !== "undefined") {
+    if (!isObject(scheduler.auto_resign)) {
+      errors.push("scheduler.auto_resign must be an object")
+    } else {
+      if (typeof scheduler.auto_resign.enable !== "boolean") {
+        errors.push("scheduler.auto_resign.enable must be boolean")
+      }
+      if (!isString(scheduler.auto_resign.cron)) {
+        errors.push("scheduler.auto_resign.cron must be a string")
+      }
+      if (typeof scheduler.auto_resign.notify_on_success !== "undefined"
+        && typeof scheduler.auto_resign.notify_on_success !== "boolean") {
+        errors.push("scheduler.auto_resign.notify_on_success must be boolean")
+      }
     }
   }
 }

@@ -60,6 +60,7 @@ function logCaptchaEvent(event = {}) {
     event.retryable !== undefined ? `retryable=${event.retryable}` : "",
     event.fatal !== undefined ? `fatal=${event.fatal}` : "",
     event.costMs ? `costMs=${event.costMs}` : "",
+    event.delayMs ? `delayMs=${event.delayMs}` : "",
     event.manualLink ? "manualLink=yes" : "",
   ].filter(Boolean)
   globalThis.logger?.mark?.(`[Lotus-Plugin] captcha ${parts.join(" ")}`)

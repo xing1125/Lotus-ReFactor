@@ -15,6 +15,9 @@ import {
   LOTUS_CAPTCHA_HANDLER_NAMESPACE,
   LOTUS_INTERCEPT_PRIORITY,
   LOTUS_RUNTIME_DISABLED_PLUGIN_NAMES,
+  isLotusEntry,
+  sortPriorityEntries,
+  syncRoutingPriorities,
 } from "../../core/intercept/priority.js"
 
 const IMAGE_SUMMARY_RELEASE_URL = "https://api.github.com/repos/palemoky/chinese-poetry-api/releases/latest"
@@ -640,23 +643,26 @@ function scheduleEnforce(loader) {
 export function enforceLotusInterception(loader) {
   if (!Array.isArray(loader?.priority)) return { ok: false, reason: "loader priority unavailable" }
 
-  loader.priority = loader.priority
-    .map((entry, index) => ({ entry, index }))
-    .sort((a, b) => {
-      const diff = numericPriority(a.entry.priority) - numericPriority(b.entry.priority)
-      if (diff) return diff
-      if (isLotusEntry(a.entry) && !isLotusEntry(b.entry)) return -1
-      if (!isLotusEntry(a.entry) && isLotusEntry(b.entry)) return 1
-      return a.index - b.index
-    })
-    .map(item => item.entry)
+  loader.priority = sortPriorityEntries(loader.priority)
 
   return { ok: true, pruned: 0 }
 }
 
-export function isLotusEntry(entry) {
-  return String(entry?.key || "").startsWith("Lotus-Plugin")
-    || String(entry?.name || "").startsWith("[Lotus-Plugin]")
+// isLotusEntry 已上移到 core/intercept/priority.js（荧后台保存路由后免重载热更新需要），
+// 这里保留导出兼容既有引用。
+export { isLotusEntry }
+
+/**
+ * 把 config/global.yaml 的 routing（query_priority / front_modules）同步到运行中的
+ * loader：更新 Lotus 条目的 priority 并重排消息处理序。荧后台保存后调用即可生效，
+ * 不再需要 #重载 Lotus-Plugin。模块开关（modules.*）本就按消息实时查，无需此函数。
+ */
+export async function applyRoutingToLoader() {
+  const loader = await importYunzaiDefault("../../../../lib/plugins/loader.js")
+  if (!loader?.priority) return { ok: true, skipped: true }
+  const result = syncRoutingPriorities(loader.priority)
+  if (result.changed) logDebug(`routing hot-applied: ${result.changed} app priority updated`)
+  return result
 }
 
 async function importYunzaiDefault(relativePath) {
@@ -676,12 +682,6 @@ async function importRuntimeDefault(...segments) {
   } catch {
     return null
   }
-}
-
-function numericPriority(value) {
-  return Number.isFinite(value) || value === Number.NEGATIVE_INFINITY || value === Number.POSITIVE_INFINITY
-    ? value
-    : 5000
 }
 
 function unique(values) {

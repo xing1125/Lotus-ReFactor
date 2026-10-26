@@ -1,7 +1,7 @@
 const BasePlugin = globalThis.plugin
 import { accountDisplay } from "../services/checkin/account.js"
 
-import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
+import { resolvePriority } from "../core/intercept/priority.js"
 import {
   isMissingProfileError,
   loadProfile,
@@ -20,7 +20,7 @@ export class LotusGenshinAbyss extends BasePlugin {
       name: "[Lotus-Plugin] Genshin Abyss",
       dsc: "Profile aware Genshin Spiral Abyss record",
       event: "message",
-      priority: LOTUS_INTERCEPT_PRIORITY,
+      priority: resolvePriority("genshin_abyss"),
       rule: [
         { reg: "^#(?:上期|往期)?(?:深渊|深境螺旋)[\\s\\S]*$", fnc: "abyss" },
       ],

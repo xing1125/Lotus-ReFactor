@@ -2,7 +2,7 @@ const BasePlugin = globalThis.plugin
 
 import fs from "node:fs/promises"
 import path from "node:path"
-import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
+import { resolvePriority } from "../core/intercept/priority.js"
 import { loadGlobalConfig } from "../core/config/global.js"
 import { PermissionService } from "../core/permissions/service.js"
 import { renderStatusCard, renderTemplate } from "../core/render/service.js"
@@ -30,7 +30,7 @@ export class LotusBilibili extends BasePlugin {
       name: "[Lotus-Plugin] Bilibili",
       dsc: "Lotus Bilibili parser",
       event: "message",
-      priority: LOTUS_INTERCEPT_PRIORITY,
+      priority: resolvePriority("bilibili"),
       rule: [
         { reg: "^#荷花搜视频.+", fnc: "searchVideo" },
         { reg: "^#看[0-9]+$", fnc: "pickVideo" },

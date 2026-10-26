@@ -2,7 +2,6 @@ const BasePlugin = globalThis.plugin
 import { accountDisplay } from "../services/checkin/account.js"
 
 import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
-import { replyCaptchaEvent } from "../core/captcha/notify.js"
 import {
   loadProfile,
   listProfileIds,
@@ -15,6 +14,24 @@ import { PythonEnvService } from "../services/python/env.js"
 import { ProfileSigninService, renderSigninMulti } from "../services/checkin/profileSignin.js"
 import { TestNineEnvService } from "../services/testNine/env.js"
 import { ToolInstallerService } from "../services/tools/installer.js"
+
+// 单个 profile 签到的上层兜底。子进程层已有 180s 超时，这里再包一层是为了
+// 覆盖 runner 之前的环节（loadProfile / account.refresh / 出图），
+// 任一环不结算都会让「签到中请稍后」之后再无下文，try/catch 也抓不到。
+const SIGNIN_DEADLINE_MS = 200000
+
+function withDeadline(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    // 不要 unref：进程空闲时无其它 handle，unref 会让定时器不触发。
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} 超时（${ms}ms 未返回）`))
+    }, ms)
+    Promise.resolve(promise).then(
+      value => { clearTimeout(timer); resolve(value) },
+      error => { clearTimeout(timer); reject(error) },
+    )
+  })
+}
 
 export class LotusCheckin extends BasePlugin {
   constructor() {
@@ -169,15 +186,21 @@ export class LotusCheckin extends BasePlugin {
       let lastMessage = ""
       for (const entry of entries) {
         if (!entry.profile) continue
-        const outcome = await new ProfileSigninService({ render: !multi }).run({
-          qq: userId,
-          profileId: entry.profileId,
-          profile: entry.profile,
-          installRequirements: false,
-          onCaptchaEvent: async event => {
-            await replyCaptchaEvent(this, event)
-          },
-        })
+        const outcome = await withDeadline(
+          new ProfileSigninService({ render: !multi }).run({
+            qq: userId,
+            profileId: entry.profileId,
+            profile: entry.profile,
+            installRequirements: false,
+            onCaptchaEvent: async event => {
+              // 过码过程不再发到群里（用户反馈刷屏）：底层照常打码，事件只进日志。
+              // 最终成败由合并结果卡 / 失败文案兜底，信息不会丢。
+              if (event?.type) logger?.mark?.(`[Lotus-Plugin] checkin captcha event: ${event.type}`)
+            },
+          }),
+          SIGNIN_DEADLINE_MS,
+          `Profile ${entry.profileId || 1} 签到`,
+        )
         entry.outcome = outcome
         lastOk = Boolean(outcome.ok)
         lastMessage = outcome.message || ""
@@ -187,25 +210,33 @@ export class LotusCheckin extends BasePlugin {
       const image = multi
         ? await renderSigninMulti({ userId, entries })
         : runnable[0].outcome.image
+      // 开头的「签到中请稍后」已经 @ 过一次，结果卡不再重复 @（对齐体力：一次就够）
       await replyImage(this, image, lastOk
         ? `签到完成。`
-        : `签到失败：${lastMessage}`, { at: true })
+        : `签到失败：${lastMessage}`)
     } catch (error) {
       logger?.error?.(`[Lotus-Plugin] checkin failed: ${error.stack || error.message}`)
-      const image = await renderStatusCard({
-        title: "签到失败",
-        subtitle: `${accountDisplay(String(userId))}${explicitMatch ? ` · Profile ${explicitMatch[1]}` : ""}`,
-        badge: "失败",
-        message: error.message,
-        userId,
-        items: [
-          { label: "阶段", value: "MihoyoBBSTools runner" },
-          { label: "建议", value: "先执行 #初始化签到环境，确认 profile 登录态和设备信息。" },
-        ],
-      }, {
-        saveId: `lotus-checkin-error-${userId}-${explicitMatch ? explicitMatch[1] : "multi"}`,
-      })
-      await replyImage(this, image, `签到失败：${error.message}`, { at: true })
+      // 出失败卡本身也可能卡（渲染栈偶发挂起），卡住也必须回落纯文字，
+      // 否则「签到中请稍后」之后仍然没有下文，等于白等。
+      try {
+        const image = await withDeadline(renderStatusCard({
+          title: "签到失败",
+          subtitle: `${accountDisplay(String(userId))}${explicitMatch ? ` · Profile ${explicitMatch[1]}` : ""}`,
+          badge: "失败",
+          message: error.message,
+          userId,
+          items: [
+            { label: "阶段", value: error?.timeout ? "MihoyoBBSTools 执行超时" : "MihoyoBBSTools runner" },
+            { label: "建议", value: "先执行 #初始化签到环境，确认 profile 登录态和设备信息。" },
+          ],
+        }, {
+          saveId: `lotus-checkin-error-${userId}-${explicitMatch ? explicitMatch[1] : "multi"}`,
+        }), 20000, "签到失败卡渲染")
+        await replyImage(this, image, `签到失败：${error.message}`, { at: true })
+      } catch (renderError) {
+        logger?.error?.(`[Lotus-Plugin] checkin failure card failed: ${renderError?.message}`)
+        await replyText(this, `签到失败：${error.message}`, { at: true })
+      }
     }
 
     return true

@@ -1,7 +1,7 @@
 const BasePlugin = globalThis.plugin
 import { accountDisplay } from "../services/checkin/account.js"
 
-import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
+import { resolvePriority } from "../core/intercept/priority.js"
 import {
   isMissingProfileError,
   listAllProfiles,
@@ -25,7 +25,7 @@ export class LotusPanelUpdate extends BasePlugin {
       name: "[Lotus-Plugin] Panel Update",
       dsc: "Lotus profile aware miao panel update",
       event: "message",
-      priority: LOTUS_INTERCEPT_PRIORITY,
+      priority: resolvePriority("panel_update"),
       rule: [
         {
           reg: `^#(原神)?(更新面板|面板更新|全部面板更新|更新全部面板)${PROFILE_ID_SUFFIX_PATTERN}$`,

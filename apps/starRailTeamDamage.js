@@ -1,7 +1,7 @@
 const BasePlugin = globalThis.plugin
 import { accountDisplay } from "../services/checkin/account.js"
 
-import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
+import { resolvePriority } from "../core/intercept/priority.js"
 import {
   isMissingProfileError,
   loadProfile,
@@ -20,7 +20,7 @@ export class LotusStarRailTeamDamage extends BasePlugin {
       name: "[Lotus-Plugin] StarRail Team Damage",
       dsc: "Profile aware StarRail team damage calculator",
       event: "message",
-      priority: LOTUS_INTERCEPT_PRIORITY,
+      priority: resolvePriority("starrail_team_damage"),
       rule: [
         { reg: "^\\*(?:队伍伤害|队伤|伤害)(?:详情|过程|全图)?[\\s\\S]*$", fnc: "teamDamage" },
         { reg: "^#星铁(?:队伍伤害|队伤|伤害)(?:详情|过程|全图)?[\\s\\S]*$", fnc: "teamDamage" },

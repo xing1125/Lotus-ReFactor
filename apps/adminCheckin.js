@@ -53,9 +53,11 @@ import { renderStatusCard } from "../core/render/service.js"
 import { replyImage, replyText } from "../core/transport/reply.js"
 import { replyCaptchaEvent } from "../core/captcha/notify.js"
 import { notifyProfile } from "../core/transport/notify.js"
+import { accountDisplay } from "../services/checkin/account.js"
 import { ProfileSigninService } from "../services/checkin/profileSignin.js"
 import { SchedulerService } from "../core/scheduler/service.js"
-import { ScheduledSigninService } from "../services/checkin/scheduled.js"
+import { ScheduledSigninService, applyOutcomesToPlan } from "../services/checkin/scheduled.js"
+import { emitCheckinLog } from "../core/checkinLog.js"
 
 // 批量补签时每两个账号之间的间隔，尽量降低米游社风控对同一出口 IP 的触发概率
 const RESIGN_INTERVAL_MS = 600
@@ -260,7 +262,7 @@ export class LotusAdminCheckin extends BasePlugin {
     let extra = ""
     if (samples.length) {
       extra = "\n\n预览前 12 条：\n" + samples.map(s =>
-        `• 账号 ${s.qq} · P${s.profileId}：${s.oldCount} → ${s.newCount} 个（剔除 ${s.willPrune}）`
+        `• ${s.name || accountDisplay(s.qq)} · P${s.profileId}：${s.oldCount} → ${s.newCount} 个（剔除 ${s.willPrune}）`
       ).join("\n")
     }
     await replyText(this, `[荷花插件]二次确认\n${preview}${extra}`)
@@ -306,11 +308,20 @@ export async function runResignAll(e, tail) {
 
   const results = []
   const throttle = await loadThrottle()
+  emitCheckinLog({ type: "resign-batch-start", message: `管理员全员二次签到开始，共 ${profiles.length} 个 profile` })
   for (const profile of profiles) {
     const qq = profile.user?.qq
     const profileId = profile.profile?.id || 1
+    emitCheckinLog({ type: "signing", qq: String(qq || ""), profileId, message: "二次签到开始" })
     const outcome = await runSignin(e, qq, profileId)
-    results.push({ qq, profileId, outcome })
+    emitCheckinLog({
+      type: "done",
+      qq: String(qq || ""),
+      profileId,
+      ok: outcome.ok === true,
+      message: outcome.ok ? "二次签到成功" : (outcome.message || "二次签到失败"),
+    })
+    results.push({ qq, profileId, outcome, name: accountDisplay(qq, profile.user?.platform, profile.user?.nickname) })
 
     // 把签到结果卡片投递给对应用户（force 确保即使对方 notify.enable=false 也能收到管理员的补签结果）
     // 静默模式下跳过，避免向全体用户刷屏
@@ -322,6 +333,17 @@ export async function runResignAll(e, tail) {
 
   const okCount = results.filter(r => r.outcome.ok).length
   const failCount = results.length - okCount
+  emitCheckinLog({ type: "resign-batch-end", message: `全员二次签到结束：${okCount}/${results.length} 成功` })
+
+  // 把补签结果回写进当日计划条目，保证 #签到看板 / 主人汇总与实际一致
+  // （此前补签只写审计、不碰计划，看板永远停在自动签到的旧结果）。
+  let planSync = null
+  try {
+    planSync = await applyOutcomesToPlan(results.map(({ qq, profileId, outcome }) => ({ qq, profileId, outcome })))
+  } catch (error) {
+    logger?.warn?.(`[Lotus-Plugin] 补签结果回写计划失败：${error?.message || error}`)
+  }
+
   const items = [
     { label: "操作范围", value: tail ? `指定 账号 ${tail}` : "全体已扫码用户（跨群）" },
     { label: "补签 profile 数", value: String(results.length) },
@@ -330,7 +352,7 @@ export async function runResignAll(e, tail) {
   ]
   for (const r of results.slice(0, 12)) {
     items.push({
-      label: `账号 ${r.qq} · P${r.profileId}`,
+      label: `${r.name || accountDisplay(r.qq)} · P${r.profileId}`,
       value: r.outcome.ok ? "成功" : `失败：${(r.outcome.message || "").slice(0, 40)}`,
     })
   }
@@ -338,13 +360,16 @@ export async function runResignAll(e, tail) {
     items.push({ label: "更多", value: `另有 ${results.length - 12} 个 profile` })
   }
 
+  const syncNote = planSync?.ok
+    ? `结果已同步至签到看板（更新 ${planSync.updated} 条${planSync.missing ? `，${planSync.missing} 条不在当日计划` : ""}）。`
+    : ""
   const image = await renderStatusCard({
     title: "全员二次签到",
-    subtitle: `管理员 账号 ${e.e.user_id} · 跨群生效`,
+    subtitle: `管理员 ${accountDisplay(e.e.user_id)} · 跨群生效`,
     badge: `${okCount}/${results.length}`,
     message: silent
-      ? `已为 ${results.length} 个已扫码 profile 拉起二次签到（成功 ${okCount} / 失败 ${failCount}）。当前「全局静默」模式：未向各用户推送结果卡，仅此汇总发给你（管理员）。社区签到（米游社）已包含在此次批量中。`
-      : `已为 ${results.length} 个已扫码 profile 拉起二次签到（成功 ${okCount} / 失败 ${failCount}），结果卡片已分别投递给对应用户（覆盖其所在所有群）。社区签到（米游社）已包含在此次批量中。`,
+      ? `已为 ${results.length} 个已扫码 profile 拉起二次签到（成功 ${okCount} / 失败 ${failCount}）。${syncNote}当前「全局静默」模式：未向各用户推送结果卡，仅此汇总发给你（管理员）。社区签到（米游社）已包含在此次批量中。`
+      : `已为 ${results.length} 个已扫码 profile 拉起二次签到（成功 ${okCount} / 失败 ${failCount}），${syncNote}结果卡片已分别投递给对应用户（覆盖其所在所有群）。社区签到（米游社）已包含在此次批量中。`,
     userId: e.e.user_id,
     items,
   }, {
@@ -354,7 +379,8 @@ export async function runResignAll(e, tail) {
 }
 
 // ---- 实际执行：为全体已扫码用户一键注册自动签到 + 开启通知 ----
-async function runRegisterAll(e, tail) {
+// export 供 guoba.actions.js（锅巴「快捷操作」）无头复用
+export async function runRegisterAll(e, tail) {
   const profiles = await resolveTargetProfiles(tail)
   if (!profiles.length) {
     await replyText(e, "[荷花插件]没有找到可注册的「已扫码」profile。请确认用户已通过 #扫码登录 绑定账号。")
@@ -380,7 +406,7 @@ async function runRegisterAll(e, tail) {
     const hadGroups = (profile.profile?.notify?.fallback_groups || []).length > 0
     if (userGroups.length === 0 && hadGroups) {
       logger?.warn?.(`[Lotus-Plugin] 全员注册签到 跳过 账号 ${qq}（P${profileId}）：按用户所在群过滤后为空，疑似成员关系查询不可用，保留原 fallback_groups ${JSON.stringify(profile.profile.notify.fallback_groups)}`)
-      changedSamples.push({ qq, profileId, groupCount: (profile.profile.notify.fallback_groups || []).length, pruned: 0, unsafe: true })
+      changedSamples.push({ qq, profileId, groupCount: (profile.profile.notify.fallback_groups || []).length, pruned: 0, unsafe: true, name: accountDisplay(qq, profile.user?.platform, profile.user?.nickname) })
       continue
     }
     totalUserGroupUsable += userGroups.length
@@ -390,7 +416,7 @@ async function runRegisterAll(e, tail) {
     if (result.notifyOn) notifyOn++
     if (result.changed) {
       await saveProfile(result.profile)
-      changedSamples.push({ qq, profileId, groupCount: userGroups.length, pruned: result.pruned })
+      changedSamples.push({ qq, profileId, groupCount: userGroups.length, pruned: result.pruned, name: accountDisplay(qq, profile.user?.platform, profile.user?.nickname) })
     }
   }
 
@@ -425,7 +451,7 @@ async function runRegisterAll(e, tail) {
   ]
   for (const s of changedSamples.slice(0, 10)) {
     items.push({
-      label: `账号 ${s.qq} · P${s.profileId}`,
+      label: `${s.name || accountDisplay(s.qq)} · P${s.profileId}`,
       value: s.unsafe
         ? `${s.groupCount} 个群（成员查询不可用，保留原群未改动）`
         : `${s.groupCount} 个实际群${s.pruned ? `（已剔除 ${s.pruned} 个误注册）` : ""}`,
@@ -437,7 +463,7 @@ async function runRegisterAll(e, tail) {
 
   const image = await renderStatusCard({
     title: "全员注册自动签到",
-    subtitle: `管理员 账号 ${e.e.user_id} · 按用户实际所在群写入`,
+    subtitle: `管理员 ${accountDisplay(e.e.user_id)} · 按用户实际所在群写入`,
     badge: String(registered),
     message: `已为 ${registered} 个（共 ${profiles.length} 个）已扫码 profile 开启自动签到与签到通知；fallback_groups 已按各用户实际所在群写入（共 ${totalUserGroupUsable} 条），不在的群不再投递，避免卡片误落到别的群。明日计划已重生成。`,
     userId: e.e.user_id,
@@ -500,7 +526,7 @@ async function runCleanMisregisteredGroups(e) {
   ]
   for (const s of samples) {
     items.push({
-      label: `账号 ${s.qq} · P${s.profileId}`,
+      label: `${s.name || accountDisplay(s.qq)} · P${s.profileId}`,
       value: s.unsafe
         ? `${s.oldCount} 个群（成员查询不可用，保留原群未改动）`
         : `${s.oldCount} → ${s.newCount}（剔除 ${s.pruned}${s.added ? `、补回 ${s.added}` : ""}）`,
@@ -512,7 +538,7 @@ async function runCleanMisregisteredGroups(e) {
 
   const image = await renderStatusCard({
     title: "清理误注册群",
-    subtitle: `管理员 账号 ${e.e.user_id} · 仅重写 fallback_groups`,
+    subtitle: `管理员 ${accountDisplay(e.e.user_id)} · 仅重写 fallback_groups`,
     badge: `${rewritten}/${profiles.length}`,
     message: `已对 ${rewritten} 个（共 ${profiles.length} 个有 fallback_groups 的）profile 按用户实际所在群重写 fallback_groups，共剔除 ${totalPruned} 条误写入。已注册 / 通知偏好 / 计划未受影响；下次签到结果与明日时间通知按重写后的群列表投递。`,
     userId: e.e.user_id,

@@ -61,4 +61,14 @@ git submodule update --init --recursive
 - device-plugin 的全局设备注入逻辑。
 - 小花火、rconsole 等插件里的 B站解析入口。
 
-荷花插件不会直接修改这些插件的文件。插件启动时会补齐 Yunzai/TRSS 的 `config/config/group.yaml` 禁用项，并注册更高优先级入口；验证码 handler 会替换旧的全局 handler。
+荷花插件不会直接修改这些插件的文件。插件启动时会补齐 Yunzai/TRSS 的 `config/config/group.yaml` 禁用项；验证码 handler 会替换旧的全局 handler。拦截优先级分两档（`core/intercept/priority.js`）：签到链路（体力 / 签到 / 社区签到 / 自动签到 / 登录 / 签到设置）用 `LOTUS_INTERCEPT_PRIORITY`（`-Infinity`）抢在最前；其余查询类模块（深渊 / 星铁挑战 / 面板更新 / 角色查询 / 抽卡记录 / 图鉴 / 日历素材 / 队伍伤害 / 设备绑定 / 视频解析）默认 `5001`，排在 miao / ZZZ / Atlas 的 `5000` 之后，由上游插件先接管、荷花只做后备。
+
+这一档的具体数值由 `config/global.yaml` 的 `routing` 段驱动，可以在**荧后台（锅巴）→ 荷花插件 → 命令路由**里直接改，**保存即生效**（后台会实时同步到运行中的消息处理序，无需重载插件）。
+
+```yaml
+routing:
+  query_priority: 5001   # 查询类统一优先级，越小越先接管
+  front_modules: []      # 固定抢回最前的模块 id（如 genshin_abyss / gacha_log），每行一个
+```
+
+取值优先级：环境变量 `LOTUS_QUERY_PRIORITY` > `routing.query_priority` > 内置 `5001`。

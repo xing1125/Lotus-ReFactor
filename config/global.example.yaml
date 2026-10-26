@@ -1,4 +1,12 @@
 version: 1
+# 命令路由：与其它插件抢同一个指令时谁先接管（数值越小越先）。
+# 也可在荧后台（锅巴）→ 荷花插件 → 命令路由 里改，改完 #重载 Lotus-Plugin 生效。
+routing:
+  # 查询类模块（深渊/挑战/面板/角色查询/抽卡记录/图鉴/日历/队伍伤害/设备/视频解析）的统一优先级。
+  # 默认 5001 = 排在 miao(5000)、ZZZ(70)、Atlas 之后做后备；环境变量 LOTUS_QUERY_PRIORITY 可覆盖。
+  query_priority: 5001
+  # 需要固定抢回最前（-Infinity）的模块 id，每行一个，例如 genshin_abyss / gacha_log。
+  front_modules: []
 render:
   background:
     - https://api.lvxiaodong.com/api/ys?return=json

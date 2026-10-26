@@ -24,6 +24,11 @@ const PROVIDERS = {
   plao: luluPlaoProvider,
 }
 
+// 连续失败退避阶梯（毫秒）：第 1 次失败不等待，之后依次 1.5s / 3s / 3s…
+// 目的是不把米游社的 createVerification 打成每秒一次。
+const RETRY_BACKOFF_STEPS_MS = [1500, 3000, 3000]
+const RETRY_BACKOFF_CAP_MS = 10000
+
 export class CaptchaService {
   constructor(config = {}) {
     this.config = config
@@ -47,6 +52,7 @@ export class CaptchaService {
     let refreshAttempts = 0
     let challengeUsed = false
     let lastFailure = null
+    let failureCount = 0
     const maxRefreshAttempts = this.maxChallengeRefreshAttempts(context, {
       order,
       providerAttempts,
@@ -158,6 +164,23 @@ export class CaptchaService {
 
           if (result.skipped) break
           if (result.retryable === false && !result.challengeRefresh) break
+
+          // 同一 provider 的连续重试要退避：否则失败→refresh→再失败会以
+          // 每秒一次的节奏刷 createVerification（每轮都要向米游社申请新验证码）。
+          // 阶梯按「全局失败次数」算，这样跨链重跑、跨方案切换也不会瞬间连打。
+          failureCount += 1
+          const hasMoreAttempts = providerAttempt < attemptLimit || chainAttempt < chainAttempts
+          const backoffMs = hasMoreAttempts ? this.retryBackoffMs(failureCount) : 0
+          if (backoffMs > 0) {
+            await emitCaptchaEvent(context, {
+              type: "captcha:retry-backoff",
+              provider: provider.name,
+              attempt: providerAttempt,
+              failureCount,
+              delayMs: backoffMs,
+            })
+            await sleep(backoffMs)
+          }
         }
       }
     }
@@ -202,7 +225,23 @@ export class CaptchaService {
         * Number(retryPlan.providerAttempts || this.providerAttemptLimit(context) || 1)
         * Number(retryPlan.chainAttempts || this.chainAttemptLimit(context) || 1),
     )
-    return Math.max(0, Number(this.config.refresh?.max_attempts ?? derived), derived)
+    // 显式配置优先。过去写成 Math.max(configured, derived)，会把配置值永久抬到
+    // derived（默认 3×3×2 = 18），导致想调小根本调不动 —— 风控期一次失败就会
+    // 以约 1 秒一次的节奏连续刷米游社 createVerification，反过来加重风控。
+    const configured = Number(this.config.refresh?.max_attempts)
+    return Math.max(0, Number.isFinite(configured) ? configured : derived)
+  }
+
+  // 连续失败后的退避。首次失败立即重试（正常场景耗时不变），
+  // 从第二次起等待，避免瞬间打满米游社的验证码申请接口。
+  retryBackoffMs(providerAttempt = 1) {
+    if (providerAttempt <= 1) return 0
+    const configured = Number(this.config.retry?.backoff_ms)
+    if (Number.isFinite(configured)) {
+      return Math.max(0, Math.min(configured * (providerAttempt - 1), RETRY_BACKOFF_CAP_MS))
+    }
+    const step = providerAttempt - 2
+    return RETRY_BACKOFF_STEPS_MS[Math.min(step, RETRY_BACKOFF_STEPS_MS.length - 1)]
   }
 
   async refreshChallenge(challenge, result, attempts, context) {
@@ -275,6 +314,13 @@ export async function solveCaptcha(challenge, context = {}) {
 
 function normalizeProviderName(name) {
   return String(name || "").trim().toLowerCase().replace(/\s+/g, "_")
+}
+
+function sleep(ms) {
+  return new Promise(resolve => {
+    const timer = setTimeout(resolve, ms)
+    if (typeof timer.unref === "function") timer.unref()
+  })
 }
 
 function nextProviderName(order, currentIndex) {

@@ -17,6 +17,28 @@ import {
 } from "../services/dailyNote/service.js"
 import { ResinPushService, RESIN_GAME_NAME } from "../services/dailyNote/push.js"
 
+// collect 内部要走 profile 读取 + 跨插件 import + 米游社请求，
+// 任何一环不结算都会让命令永久静默，所以必须有一道硬超时兜底。
+// 上限里包含了打码预算（单次过码 90s），遇到验证码的账号整体查询会明显变慢。
+const DAILY_NOTE_DEADLINE_MS = 150000
+// 渲染 / 发送的独立上限。单张卡片正常 1~2s，超过这个值就是真卡住了，
+// 继续等只会让用户永远收不到回复。
+const RENDER_DEADLINE_MS = 20000
+const SEND_DEADLINE_MS = 12000
+
+function withDeadline(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    // 注意：不要 unref，否则进程没有其它 handle 时定时器不触发。
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} 超时（${ms}ms 未返回）`))
+    }, ms)
+    Promise.resolve(promise).then(
+      (value) => { clearTimeout(timer); resolve(value) },
+      (error) => { clearTimeout(timer); reject(error) },
+    )
+  })
+}
+
 const RESIN_PUSH_ENABLE_RE = /^#?(原神|星铁|绝区零)?开启体力推送(?:\s*(\d+))?$/
 const RESIN_PUSH_DISABLE_RE = /^#?(原神|星铁|绝区零)?关闭体力推送(?:\s*(\d+))?$/
 const RESIN_PUSH_THRESHOLD_RE = /^#?(原神|星铁|绝区零)?体力推送阈值\s*(\d+)$/
@@ -234,35 +256,121 @@ export class LotusDailyNote extends BasePlugin {
     await replyText(this, "查询中请稍等", { at: true })
 
     const service = new DailyNoteService()
-    const results = await service.collect({
-      qq: userId,
-      profileId,
-      games,
-    })
+    const started = Date.now()
+    let results
+    try {
+      // 必须带硬超时：collect 内部会 await 跨插件 import + 米游社请求，
+      // 任一环节不结算就会「回了提示语然后永久静默」，线上已经踩过。
+      results = await withDeadline(
+        service.collect({
+          qq: userId,
+          profileId,
+          games,
+          // 过码过程不再发到群里（用户反馈刷屏）：底层照常打码，事件只进日志。
+          onCaptchaEvent: async event => {
+            if (event?.type) globalThis.logger?.mark?.(`[Lotus-Plugin] dailyNote captcha event: ${event.type}`)
+          },
+        }),
+        DAILY_NOTE_DEADLINE_MS,
+        "dailyNote collect",
+      )
+    } catch (error) {
+      globalThis.logger?.error?.(
+        `[Lotus-Plugin] dailyNote collect failed after ${Date.now() - started}ms: ${error?.stack || error?.message}`,
+      )
+      await replyText(this, `体力查询失败：${error?.message || "未知错误"}`, { at: true })
+      return true
+    }
+    globalThis.logger?.mark?.(
+      `[Lotus-Plugin] dailyNote collect done ${Date.now() - started}ms, ${results?.length || 0} 条`,
+    )
 
     if (!results.length) {
       await replyText(this, "没有找到可查询的账号，请先 #扫码登录 并同步 UID。")
       return true
     }
 
-    // jj 出图格式：每个游戏/账号各一张独立面板，逐张发送，不带文字、不再 @、不带插件前缀
-    for (const [index, item] of results.entries()) {
-      const image = await renderTemplate("daily-note-summary", buildDailyNoteRenderData({
-        userId,
-        profileId,
-        games,
-        results: [item],
-      }), {
-        saveId: `lotus-daily-note-${userId}-${profileId || "all"}-${item.game}-${item.uid || index}`,
-      })
-      await replyImage(this, image, "")
+    const okResults = results.filter(item => item?.ok)
+    // 失败项必须留痕：之前这里只统计数量，P2 因 5003/1034 被静默丢弃，
+    // 用户只看到另一个账号的卡，误以为「账号只剩一个」。
+    const failedResults = results.filter(item => !item?.ok)
+    const failureLines = failedResults.map(describeDailyNoteFailure)
+    if (failedResults.length) {
+      globalThis.logger?.warn?.(
+        `[Lotus-Plugin] dailyNote 失败 ${failedResults.length}/${results.length}：${failureLines.join(" | ")}`,
+      )
+    }
+    if (!okResults.length) {
+      await replyText(this, `体力查询失败：\n${failureLines.join("\n") || "未知错误"}`, { at: true })
+      return true
+    }
+
+    // jj 出图格式：每个游戏/账号各一张独立面板，逐张发送，不带文字、不再 @、不带插件前缀。
+    // 渲染和发送也必须各自带 deadline：模板内部会去拉头像/图标等外部资源，
+    // 本进程的 undici body 流挂死时那次 fetch 永不结算，卡在这里就等于
+    // 「查到数据了却永远不出图」——线上已复现（collect 成功 1543ms 后 60s 无日志）。
+    let sent = 0
+    for (const [index, item] of okResults.entries()) {
+      try {
+        const image = await withDeadline(
+          renderTemplate("daily-note-summary", buildDailyNoteRenderData({
+            userId,
+            profileId,
+            games,
+            results: [item],
+          }), {
+            saveId: `lotus-daily-note-${userId}-${profileId || "all"}-${item.game}-${item.uid || index}`,
+          }),
+          RENDER_DEADLINE_MS,
+          `${item.game || "体力"} 卡片渲染`,
+        )
+        await withDeadline(replyImage(this, image, ""), SEND_DEADLINE_MS, `${item.game || "体力"} 卡片发送`)
+        sent += 1
+      } catch (error) {
+        globalThis.logger?.error?.(
+          `[Lotus-Plugin] dailyNote render/send failed (${item.game || "-"}/${item.uid || "-"}): ${error?.message}`,
+        )
+        await replyText(
+          this,
+          `体力面板生成失败（${item.game || "未知"}${item.uid ? ` ${item.uid}` : ""}）：${error?.message || "未知错误"}`,
+          { at: true },
+        ).catch(() => {})
+      }
       // 多张卡之间稍作间隔，避免刷屏风控
-      if (results.length > 1 && index < results.length - 1) {
+      if (okResults.length > 1 && index < okResults.length - 1) {
         await new Promise(resolve => setTimeout(resolve, 800))
       }
     }
+    globalThis.logger?.mark?.(`[Lotus-Plugin] dailyNote rendered ${sent}/${okResults.length} 张`)
+
+    // 部分失败要明确回一条文字：出图成功不代表所有账号都查到了。
+    if (failedResults.length) {
+      await replyText(
+        this,
+        `以下 ${failedResults.length} 项没查到（其余已出图）：\n${failureLines.join("\n")}`,
+        { at: true },
+      ).catch(() => {})
+    }
     return true
   }
+}
+
+// 体力失败话术：retcode 决定用户该做什么，别把空的 message 直接抛给用户。
+function describeDailyNoteFailure(item = {}) {
+  const profileId = item.profileId || 1
+  const game = dailyNoteGameName(item.game) || "账号"
+  const where = `P${profileId} ${game}${item.uid ? ` ${item.uid}` : ""}`
+  const code = Number(item?.raw?.retcode)
+  if (code === 5003) {
+    return `${where}：米游社风控拦截（该档案没有可用设备时最常见），先用这个号在手机米游社里打开一次「原神 → 体力」，或 #绑定设备${profileId}`
+  }
+  if (code === 1034) {
+    return `${where}：账号与设备需要验证，自动过码未通过；用这个号在手机米游社里打开一次「原神 → 体力」即可解除`
+  }
+  if (code === 10001 || code === -100 || code === 10101) {
+    return `${where}：CK 已失效，请 #扫码登录 重新绑定`
+  }
+  return `${where}：${item.error || "查询失败"}`
 }
 
 const WEEK = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"]

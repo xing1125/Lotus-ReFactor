@@ -1,7 +1,7 @@
 const BasePlugin = globalThis.plugin
 import { accountDisplay } from "../services/checkin/account.js"
 
-import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
+import { resolvePriority } from "../core/intercept/priority.js"
 import {
   isMissingProfileError,
   loadProfile,
@@ -16,18 +16,19 @@ import { StarRailChallengeService } from "../services/starRailChallenge/service.
 
 // 与 core/intercept/personal-query.js 共用同一份词表，避免两处漂移。
 const SR_WORDS = "(?:深渊|忘却|忘却之庭|混沌|混沌回忆|虚构|虚构叙事|末日|末日幻影|异乡|异相|异向|仲裁|异相仲裁)"
-const SR_PREFIX = "(?:星铁|崩铁|星穹|星穹铁道|崩坏星穹铁道)"
 
+// 星铁挑战卡只守荷花自己的 `*` 命名空间。`#星铁` 前缀整体让给 genshin（它覆盖全部 11 个
+// 挑战模式，含模拟宇宙 / 差分宇宙等荷花未复刻的玩法），避免两边同名规则双触发出双图。
+// 谁有谁响应：*` = 荷花自制 4 类；#星铁* = genshin 全量。
 export class LotusStarRailChallenge extends BasePlugin {
   constructor(options = {}) {
     super({
       name: "[Lotus-Plugin] StarRail Challenge",
       dsc: "Profile aware StarRail challenge records (hall/story/boss/peak)",
       event: "message",
-      priority: LOTUS_INTERCEPT_PRIORITY,
+      priority: resolvePriority("starrail_challenge"),
       rule: [
         { reg: `^\\*(?:往期|上期|本期|最新|当期)?${SR_WORDS}[\\s\\S]*$`, fnc: "challenge" },
-        { reg: `^#${SR_PREFIX}(?:往期|上期|本期|最新|当期)?${SR_WORDS}[\\s\\S]*$`, fnc: "challenge" },
       ],
     })
     this.service = options.service || new StarRailChallengeService(options)

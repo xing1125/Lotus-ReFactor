@@ -1,6 +1,6 @@
 const BasePlugin = globalThis.plugin
 
-import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
+import { resolvePriority } from "../core/intercept/priority.js"
 import { replyText } from "../core/transport/reply.js"
 import { MiaoWikiBridge } from "../services/pluginBridge/miaoWiki.js"
 
@@ -10,7 +10,7 @@ export class LotusMiaoCalendar extends BasePlugin {
       name: "[Lotus-Plugin] Miao Calendar",
       dsc: "Lotus bridge for miao calendar and material commands",
       event: "message",
-      priority: LOTUS_INTERCEPT_PRIORITY,
+      priority: resolvePriority("miao_calendar"),
       rule: [
         {
           reg: "^(#|喵喵)(日历|日历列表)$",

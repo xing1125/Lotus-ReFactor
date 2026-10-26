@@ -2,7 +2,7 @@ const BasePlugin = globalThis.plugin
 import { accountDisplay } from "../services/checkin/account.js"
 
 import { PERSONAL_QUERY_RULES } from "../core/intercept/personal-query.js"
-import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
+import { resolvePriority } from "../core/intercept/priority.js"
 import {
   isMissingProfileError,
   loadProfile,
@@ -22,8 +22,12 @@ export class LotusProfileQuery extends BasePlugin {
       name: "[Lotus-Plugin] Profile Query",
       dsc: "Lotus profile aware personal UID queries",
       event: "message",
-      priority: LOTUS_INTERCEPT_PRIORITY,
-      rule: PERSONAL_QUERY_RULES.map(rule => ({ ...rule })),
+      priority: resolvePriority("profile_query"),
+      // 转接型规则：本质是把命令转给喵喵/ZZZ 等外部插件执行。
+      // log:false（原始标记）让 index.js 的模块开关 gate 在「委派个人查询」被锅巴关闭时
+      // 静默放行——命令完整归外部插件处理，不再补「功能已在锅巴中关闭」提示。
+      // （运行时 silencePluginLogs 本就会把 log 统一置 false，这里只影响 gate 的显式性判定）
+      rule: PERSONAL_QUERY_RULES.map(rule => ({ ...rule, log: false })),
     })
     this.miao = options.miao || new MiaoProfileQueryBridge(options)
     this.zzz = options.zzz || new ZzzProfileQueryBridge(options)
@@ -151,8 +155,14 @@ export class LotusProfileQuery extends BasePlugin {
       const profile = await refreshProfileBeforeQuery(userId, profileId, loadedProfile)
       const result = await runner(profile)
       if (!result.forwarded?.length) {
-        const message = pickMessage(result.messages) || `${command} 已执行，但外部插件没有返回图片。`
-        await replyText(this, `[荷花插件]${message}`)
+        const message = pickMessage(result.messages)
+        if (message) {
+          await replyText(this, `[荷花插件]${message}`)
+        } else {
+          // 外部插件没有任何经包装事件回复的内容：其深层代码（如 MysInfo）已自行回复进群，
+          // 这里不再补兜底文案，避免在喵喵已报错后追加「没有返回图片」噪音
+          logger?.mark?.(`[Lotus-Plugin] ${command} 无转发图片且无捕获回复（外部插件应已自行回复），跳过兜底文案`)
+        }
       }
     } catch (error) {
       if (isMissingProfileError(error)) {

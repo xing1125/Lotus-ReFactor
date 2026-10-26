@@ -4,7 +4,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 const BasePlugin = globalThis.plugin
 
-import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
+import { resolvePriority } from "../core/intercept/priority.js"
 import { loadProfile } from "../core/config/profile.js"
 import { isCnServer, resolveServer } from "../core/mihoyo/regions.js"
 import { getRoleUid, pickRole } from "../services/pluginBridge/common.js"
@@ -21,7 +21,7 @@ export class LotusGenshinChallenge extends BasePlugin {
       name: "[Lotus-Plugin] Genshin Challenge Capture",
       dsc: "Master-only capture of genshin role_combat / hard_challenge raw payloads",
       event: "message",
-      priority: LOTUS_INTERCEPT_PRIORITY,
+      priority: resolvePriority("genshin_challenge_capture"),
       rule: [
         { reg: "^#捕获挑战数据$", fnc: "capture", permission: "master" },
       ],

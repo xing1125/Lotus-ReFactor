@@ -13,7 +13,12 @@ import {
 } from "../mihoyo/regions.js"
 import { solveCaptcha } from "./service.js"
 
-const CAPTCHA_RETCODES = new Set([1034, 10035, 10041])
+// 5003 必须在这里：genshin 的 mysInfo 把 5003 与 1034 归为同一类验证码
+//（`case 1034: case 5003: case 10035: case 10041:` 一起走 Handler）。
+// 漏掉它的后果非常隐蔽：solveMysRequestCaptcha 会在第 38 行 1ms 内 reject，
+// 不打任何 captcha 日志，用户侧只收到「米游社账号异常，请绑定设备」，
+// 而 device_fp handler 的 5003 重试通常也失败，看起来像「绑了设备也没用」。
+const CAPTCHA_RETCODES = new Set([1034, 5003, 10035, 10041])
 const COOKIE_REFRESH_RETCODES = new Set([-100, 10001, 10101, 10102, 10103])
 
 export async function solveMysRequestCaptcha({
@@ -67,6 +72,21 @@ export async function solveMysRequestCaptcha({
   }, fetchImpl)
   const rpcChallenge = verified?.data?.challenge
   if (!rpcChallenge) {
+    // 打码成功但米游社不认 validate 时，必须能看到 verify 的真实响应，
+    // 否则上层只会拿到一句兜底文案「验证码校验失败」，无法区分是
+    // 参数不匹配 / DS 算错 / device_fp 不一致 / 账号被风控。
+    try {
+      const short = (v) => (typeof v === "string" && v.length > 12 ? `${v.slice(0, 12)}...(${v.length})` : v)
+      globalThis.logger?.mark?.(
+        `[Lotus-Plugin] captcha verify rejected: retcode=${context.retcode}` +
+        ` gt=${short(created.data?.gt)}` +
+        ` challenge=${short(solved.challenge || created.data?.challenge)}` +
+        ` validate=${short(solved.validate || solved.token)}` +
+        ` dfp=${short(context.extraHeaders?.["x-rpc-device_fp"])}` +
+        ` headers=${JSON.stringify(Object.keys(context.extraHeaders || {}))}` +
+        ` resp=${JSON.stringify(verified)}`,
+      )
+    } catch {}
     return {
       retcode,
       message: verified?.message || "验证码校验失败",
@@ -126,10 +146,13 @@ export async function createMysCaptchaContext(e, mysApi, retcode) {
   }
 }
 
-export async function requestCaptchaChallenge(context, fetchImpl = globalThis.fetch) {
+export async function requestCaptchaChallenge(context, fetchImpl = globalThis.fetch, options = {}) {
+  // is_high 默认 true（高风险通道）。留出开关只为对照实验，实测两档返回的
+  // gt/challenge 完全一致（gt 都是 846fea0f...），不影响结果。
+  const isHigh = options.isHigh !== false
   const query = context.retcode === 10035
-    ? `is_high=true&app_key=${encodeURIComponent(context.appKey)}`
-    : "is_high=true"
+    ? `is_high=${isHigh}&app_key=${encodeURIComponent(context.appKey)}`
+    : `is_high=${isHigh}`
   const url = context.retcode === 10035
     ? `${apiHost(context)}event/toolcomsrv/risk/createGeetest?${query}`
     : `${recordHost(context)}game_record/app/card/wapi/createVerification?${query}`
@@ -171,6 +194,9 @@ export async function verifyCaptchaChallenge(context, solved, fetchImpl = global
 async function requestMysJson(context, fetchImpl, request) {
   if (typeof fetchImpl !== "function") throw new Error("fetch is unavailable")
   const headers = buildMysHeaders(context, request.query, request.body)
+  // x-trace-id 是「响应头」，请求时正确的名字是 x-rpc-challenge_trace——
+  // 之前这里把 x-trace-id 当请求头发出去，属于协议用错（服务端不会识别）。
+  if (context.traceId) headers["x-rpc-challenge_trace"] = context.traceId
   const response = await fetchImpl(request.url, {
     method: request.method || (request.body ? "POST" : "GET"),
     headers: {
@@ -180,6 +206,18 @@ async function requestMysJson(context, fetchImpl, request) {
     },
     body: request.body || undefined,
   })
+  // 记录响应头里的 x-trace-id，供后续 verify 作为 x-rpc-challenge_trace 回传。
+  // 注意：脱离真实风控事件直接调 verifyVerification 时，米游社恒定返回
+  // 10306（带 x-rpc-challenge_game）或 -1「拼图已过期」（不带），
+  // 这与打码质量无关，不能拿孤立探测的结果判断链路好坏。
+  try {
+    const traceId = response.headers?.get?.("x-trace-id")
+    if (traceId) context.traceId = traceId
+    const log = globalThis.logger?.mark
+      ? (m) => globalThis.logger.mark(m)
+      : (m) => console.log(m)
+    log(`[Lotus-Plugin] captcha ${request.method || "GET"} ${request.url.split("?")[0]} -> ${response.status} trace=${traceId || "(none)"}`)
+  } catch {}
   const text = await response.text()
   const data = text ? JSON.parse(text) : null
   if (!response.ok) {

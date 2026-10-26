@@ -3,7 +3,7 @@ import { accountDisplay } from "../services/checkin/account.js"
 
 import path from "node:path"
 import { pathToFileURL } from "node:url"
-import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
+import { resolvePriority } from "../core/intercept/priority.js"
 import {
   isMissingProfileError,
   listProfileIds,
@@ -31,7 +31,7 @@ export class LotusGachaLog extends BasePlugin {
       name: "[Lotus-Plugin] Gacha Log",
       dsc: "Lotus profile aware gacha log update",
       event: "message",
-      priority: LOTUS_INTERCEPT_PRIORITY,
+      priority: resolvePriority("gacha_log"),
       rule: [
         {
           reg: `^#?(获取|更新)(提瓦特)?小助手(抽卡|祈愿)?(记录|历史)${PROFILE_ID_SUFFIX_PATTERN}$`,

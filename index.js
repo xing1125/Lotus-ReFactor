@@ -98,19 +98,33 @@ function pickAppClass(moduleExports) {
 // 显式 false（锅巴「功能开关」）→ 短提示并吞掉消息；未登记 / 读取失败 → 一律放行（fail-open）。
 function gatePluginModules(AppClass, moduleId) {
   if (!moduleId) return AppClass
+  // 打标：荧后台保存 routing 后，applyRoutingToLoader 靠它把条目映射回模块 id 热更新优先级。
+  // 静态属性沿 extends 原型链可查，包装子类（gate/silence）无需感知。
+  AppClass.__lotusModuleId = moduleId
   return class LotusModuleGate extends AppClass {
     constructor(...args) {
       super(...args)
-      const fncs = new Set((this.rule || []).map(entry => entry?.fnc).filter(Boolean))
-      for (const fnc of fncs) {
-        if (typeof this[fnc] !== "function") continue
-        this[fnc] = (...callArgs) => this.__runGated(fnc, callArgs)
+      // fnc -> rule 条目；同一 fnc 多条 rule 时优先保留显式条目（原始 log !== false）
+      const ruleByFnc = new Map()
+      for (const entry of this.rule || []) {
+        if (!entry?.fnc || typeof this[entry.fnc] !== "function") continue
+        const existing = ruleByFnc.get(entry.fnc)
+        if (!existing || (existing.__lotusExplicitRule === false && entry.__lotusExplicitRule !== false)) {
+          ruleByFnc.set(entry.fnc, entry)
+        }
+      }
+      for (const [fnc, entry] of ruleByFnc) {
+        this[fnc] = (...callArgs) => this.__runGated(fnc, entry, callArgs)
       }
     }
-    async __runGated(fnc, callArgs) {
+    async __runGated(fnc, ruleEntry, callArgs) {
       let enabled = true
       try { enabled = await isModuleEnabled(moduleId) } catch { }
       if (!enabled) {
+        // 被动监听型 rule（原始 log:false）命中面极宽（如成就导入的 ^[\s\S]*$ 会匹配群里
+        // 一切消息），模块关闭时若也回「功能已关闭」会导致每条群消息刷屏；
+        // 静默 return false 放行给其他插件处理，只对显式命令提示
+        if (ruleEntry?.__lotusExplicitRule === false) return false
         try { await replyText(this, `[荷花插件]「${moduleLabel(moduleId)}」功能已在锅巴中关闭`) } catch { }
         return true
       }
@@ -132,6 +146,10 @@ function silencePluginLogs(AppClass) {
 function silenceEntries(entries) {
   if (!entries) return
   for (const entry of Array.isArray(entries) ? entries : [entries]) {
-    if (entry && typeof entry === "object") entry.log = false
+    if (entry && typeof entry === "object") {
+      // 在改写 log 前记录原始显式性：gate 靠它区分「被动监听型 rule」（原始 log:false）
+      entry.__lotusExplicitRule = entry.log !== false
+      entry.log = false
+    }
   }
 }

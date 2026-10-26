@@ -1,4 +1,136 @@
+import fs from "node:fs"
+import YAML from "yaml"
+import { resolveConfig } from "../path.js"
+
+// 拦截优先级（数值越小越先执行）。分两档：
+//
+// ① 签到链路始终抢在最前：体力/便笺、手动签到、社区签到（TapTap / 微博 / 米游社社区）、
+//    自动签到调度、扫码登录、签到设置、验证码处理。这些是荷花的主职，上游插件没有等价实现。
 export const LOTUS_INTERCEPT_PRIORITY = Number.NEGATIVE_INFINITY
+
+// ② 查询类模块退居上游插件之后做后备：深渊 / 星铁挑战 / 面板更新 / 角色查询 / 抽卡记录 /
+//    图鉴 / 日历素材 / 队伍伤害 / 设备绑定 / 视频解析。
+//    实际取值来自 config/global.yaml 的 routing.query_priority（荧后台「命令路由」可改），
+//    默认 5001 = 排在 miao、ZZZ、Atlas 的 5000 之后；上游不接管（无规则或返回 false）时由荷花兜底。
+export const LOTUS_QUERY_PRIORITY = 5001
+
+// 环境变量仍可作为部署级覆盖（优先于配置文件）。
+const ENV_QUERY_PRIORITY = (() => {
+  const raw = process.env.LOTUS_QUERY_PRIORITY
+  if (raw === undefined || raw === null || String(raw).trim() === "") return null
+  const value = Number(raw)
+  return Number.isNaN(value) ? null : value
+})()
+
+let routingCache = null
+let routingCacheStamp = ""
+
+function readRoutingConfig() {
+  let routing = {}
+  let stamp = "missing"
+  try {
+    const file = resolveConfig("global.yaml")
+    if (fs.existsSync(file)) {
+      const stat = fs.statSync(file)
+      stamp = `${stat.mtimeMs}:${stat.size}`
+      if (routingCache && routingCacheStamp === stamp) return routingCache
+      const parsed = YAML.parse(fs.readFileSync(file, "utf8")) || {}
+      if (parsed.routing && typeof parsed.routing === "object") routing = parsed.routing
+    }
+  } catch {
+    routing = {}
+  }
+  if (routingCache && routingCacheStamp === stamp) return routingCache
+  routingCacheStamp = stamp
+
+  const configured = Number(routing.query_priority)
+  routingCache = {
+    queryPriority: ENV_QUERY_PRIORITY !== null
+      ? ENV_QUERY_PRIORITY
+      : (Number.isNaN(configured) ? LOTUS_QUERY_PRIORITY : configured),
+    frontModules: Array.isArray(routing.front_modules)
+      ? routing.front_modules.map(item => String(item).trim()).filter(Boolean)
+      : [],
+  }
+  return routingCache
+}
+
+/** 查询类模块的优先级（routing.query_priority / 环境变量 / 默认 5001）。 */
+export function resolveQueryPriority() {
+  return readRoutingConfig().queryPriority
+}
+
+/**
+ * 按模块 id 解析优先级：routing.front_modules 里的模块固定 -Infinity（抢回最前），
+ * 其余走 routing.query_priority。id 取 core/config/modules.js 的 FEATURE_MODULES。
+ * priority 在插件构造时确定，改配置后需 #重载 Lotus-Plugin。
+ */
+export function resolvePriority(moduleId) {
+  const routing = readRoutingConfig()
+  if (moduleId && routing.frontModules.includes(moduleId)) return LOTUS_INTERCEPT_PRIORITY
+  return routing.queryPriority
+}
+
+/** 供探针/测试在改配置后重置缓存用。 */
+export function resetRoutingCache() {
+  routingCache = null
+  routingCacheStamp = ""
+}
+
+// ---- 运行中的 loader 热更新（荧后台保存后免重载生效） ----
+
+/** 判断 loader.priority 条目是否属于本插件（与 services/intercept/runtime.js 同一判据）。 */
+export function isLotusEntry(entry) {
+  return String(entry?.key || "").startsWith("Lotus-Plugin")
+    || String(entry?.name || "").startsWith("[Lotus-Plugin]")
+}
+
+function numericPriority(value) {
+  return Number.isFinite(value) || value === Number.NEGATIVE_INFINITY || value === Number.POSITIVE_INFINITY
+    ? value
+    : 5000
+}
+
+/**
+ * 按 priority 升序重排条目；同优先级时 Lotus 条目在前（复刻 TRSS loader 的
+ * lodash.orderBy + enforceLotusInterception 语义）。原地写回，保持数组引用不变。
+ */
+export function sortPriorityEntries(entries) {
+  const ordered = entries
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => {
+      const diff = numericPriority(a.entry.priority) - numericPriority(b.entry.priority)
+      if (diff) return diff
+      if (isLotusEntry(a.entry) && !isLotusEntry(b.entry)) return -1
+      if (!isLotusEntry(a.entry) && isLotusEntry(b.entry)) return 1
+      return a.index - b.index
+    })
+    .map(item => item.entry)
+  for (let index = 0; index < entries.length; index++) entries[index] = ordered[index]
+  return entries
+}
+
+/**
+ * 把当前 routing 配置同步到 loader.priority 条目并重排。
+ * 条目通过 class.__lotusModuleId（index.js 装载时打标）识别所属模块。
+ * 返回 { ok, changed }，changed = 优先级实际变化的条目数。
+ */
+export function syncRoutingPriorities(entries) {
+  if (!Array.isArray(entries)) return { ok: false, reason: "entries unavailable" }
+  let changed = 0
+  for (const entry of entries) {
+    if (!isLotusEntry(entry)) continue
+    const moduleId = entry?.class?.__lotusModuleId
+    if (!moduleId) continue
+    const next = resolvePriority(moduleId)
+    if (entry.priority !== next) {
+      entry.priority = next
+      changed++
+    }
+  }
+  if (changed) sortPriorityEntries(entries)
+  return { ok: true, changed }
+}
 
 export const LOTUS_CONFIG_DISABLED_PLUGIN_NAMES = Object.freeze([
   // TRSS-Plugin overlaps

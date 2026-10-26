@@ -1,7 +1,7 @@
 const BasePlugin = globalThis.plugin
 import { accountDisplay } from "../services/checkin/account.js"
 
-import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
+import { resolvePriority } from "../core/intercept/priority.js"
 import { matchPersonalQuery } from "../core/intercept/personal-query.js"
 import {
   isMissingProfileError,
@@ -63,7 +63,7 @@ export class LotusAchievements extends BasePlugin {
       name: "[Lotus-Plugin] Achievements",
       dsc: "Genshin achievement atlas progress",
       event: "message",
-      priority: LOTUS_INTERCEPT_PRIORITY,
+      priority: resolvePriority("achievements"),
       rule: [
         {
           reg: `^#成就(?:目录|索引|列表|查漏)?${PROFILE_ID_SUFFIX_PATTERN}$`,

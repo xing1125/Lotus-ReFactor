@@ -1,13 +1,14 @@
 import path from "node:path"
-import { pathToFileURL } from "node:url"
 import {
   listProfileIds,
   loadProfile,
+  saveProfile,
 } from "../../core/config/profile.js"
-import { isCookieRefreshableResponse } from "../../core/captcha/mysHandler.js"
+import { isCookieRefreshableResponse, solveMysRequestCaptcha } from "../../core/captcha/mysHandler.js"
 import { deviceHeaders } from "../../core/devices/service.js"
 import { AccountService } from "../../core/login/account.js"
 import { resolveServer } from "../../core/mihoyo/regions.js"
+import { importGenshinModule } from "../genshinBridge/load.js"
 import { registerProfileWithGenshin } from "../genshinBridge/profile.js"
 
 const GAME_NAMES = Object.freeze({
@@ -16,17 +17,81 @@ const GAME_NAMES = Object.freeze({
   zzz: "绝区零",
 })
 
+// 与 genshin mysInfo 同口径：1034/5003/10035/10041 都是「可以用验证码续上」的响应。
+// 单次过码上限 90s（test_nine 单次 20s、provider_attempts 3）。
+const CAPTCHA_RETCODES = new Set([1034, 5003, 10035, 10041])
+const CAPTCHA_TIMEOUT_MS = 90000
+
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      reject(new Error(`${label} 超时（${ms}ms 未返回）`))
+    }, ms)
+    promise.then(
+      value => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(value)
+      },
+      error => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
+}
+
+export function isDailyNoteCaptchaResponse(res) {
+  return CAPTCHA_RETCODES.has(Number(res?.retcode))
+}
+
+// 游戏记录域对「没有设备」的请求直接 5003，对「陌生设备」给 1034。
+// 同一个人的多个档案实际是同一台手机，这里把已绑定设备的兄弟档案借过来，
+// 让 P2 这类「只扫码、没绑设备」的档案至少能走到验证码这一步。
+export async function ensureDeviceForDailyNote(profile) {
+  if (!profile) return profile
+  if (profile.device?.id && profile.device?.fp) return profile
+  const qq = String(profile.user?.qq || "")
+  const profileId = Number(profile.profile?.id || 1)
+  if (!qq) return profile
+
+  const ids = await listProfileIds(qq).catch(() => [])
+  for (const id of ids) {
+    if (Number(id) === profileId) continue
+    const sibling = await loadProfile(qq, id).catch(() => null)
+    const device = sibling?.device
+    if (!device?.id || !device?.fp) continue
+    profile.device = {
+      ...device,
+      bound: true,
+      shared_from_profile: Number(id),
+    }
+    await saveProfile(profile).catch(() => {})
+    globalThis.logger?.mark?.(
+      `[Lotus-Plugin] dailyNote P${profileId} 未绑定设备，已借用同一用户 P${id} 的设备（${device.name || device.model || device.id}）`,
+    )
+    return profile
+  }
+  return profile
+}
+
 export class DailyNoteService {
   constructor(options = {}) {
     this.MysApi = options.MysApi
   }
 
-  async collect({ qq, profileId, games = ["gs", "sr", "zzz"] } = {}) {
+  async collect({ qq, profileId, games = ["gs", "sr", "zzz"], onCaptchaEvent } = {}) {
     const profileIds = profileId ? [profileId] : await listProfileIds(qq)
     const results = []
 
     for (const id of profileIds) {
-      const profile = await loadProfile(qq, id).catch(error => {
+      const loaded = await loadProfile(qq, id).catch(error => {
         results.push({
           ok: false,
           profileId: id,
@@ -36,9 +101,9 @@ export class DailyNoteService {
         })
         return null
       })
-      if (!profile) continue
+      if (!loaded) continue
 
-      if (!profile.account?.cookie) {
+      if (!loaded.account?.cookie) {
         results.push({
           ok: false,
           profileId: id,
@@ -49,13 +114,15 @@ export class DailyNoteService {
         continue
       }
 
+      const profile = await ensureDeviceForDailyNote(loaded).catch(() => loaded)
+
       for (const game of games) {
         const roles = normalizeRoles(profile.account?.game_roles?.[game])
         // 未绑定该游戏（没同步过 UID）→ 静默跳过，不出「未绑定」错误面板（jj 行为：没有就不显示）
         if (!roles.length) continue
 
         for (const role of roles) {
-          results.push(await this.queryDailyNote(profile, game, role))
+          results.push(await this.queryDailyNote(profile, game, role, { qq, onCaptchaEvent }))
         }
       }
     }
@@ -63,7 +130,7 @@ export class DailyNoteService {
     return results
   }
 
-  async queryDailyNote(profile, game, role) {
+  async queryDailyNote(profile, game, role, options = {}) {
     const uid = String(role.uid || role.game_uid || role)
     const profileId = profile.profile?.id || 1
     try {
@@ -92,6 +159,22 @@ export class DailyNoteService {
             uid,
           })
         }
+      }
+
+      // 1034/5003/10035/10041 → 走打码（对齐 genshin mysInfo.checkCode 的行为），
+      // 过码成功直接拿到重试后的数据；失败则落回普通失败路径，由上层明示原因。
+      if (isDailyNoteCaptchaResponse(res)) {
+        const solved = await this.solveDailyNoteCaptcha({
+          MysApi,
+          profile: currentProfile,
+          game,
+          role,
+          uid,
+          res,
+          qq: options.qq,
+          onCaptchaEvent: options.onCaptchaEvent,
+        })
+        if (solved) res = solved
       }
 
       if (!res || res.retcode !== 0) {
@@ -125,6 +208,51 @@ export class DailyNoteService {
         nickname: role.nickname || "",
         error: error.message,
       }
+    }
+  }
+
+  // 走 Lotus 的打码链路（createVerification → 过码 → verifyVerification → 带 challenge 重试），
+  // 与 genshin `MysInfo.checkCode` 同源。设备缺失时上层已借好兄弟档案的设备，
+  // 否则米游社对无设备请求直接 5003，连验证码环节都进不去。
+  async solveDailyNoteCaptcha({ MysApi, profile, game, role, uid, res, qq, onCaptchaEvent }) {
+    const profileId = profile?.profile?.id || 1
+    const cookie = profile?.account?.cookie
+    if (!cookie) return null
+    const server = resolveServer({ server: role?.region, uid, game })
+    const api = new MysApi(uid, cookie, {
+      game,
+      server,
+      device: profile.device?.id || "",
+      log: false,
+    })
+    applyServerToMysApi(api, server)
+
+    try {
+      const solved = await withTimeout(
+        solveMysRequestCaptcha({
+          e: { user_id: String(qq || profile?.user?.qq || ""), game, uid, server },
+          args: {
+            mysApi: api,
+            res,
+            type: "dailyNote",
+            data: { headers: deviceHeaders(profile.device) },
+          },
+          onCaptchaEvent,
+        }),
+        CAPTCHA_TIMEOUT_MS,
+        `P${profileId} ${game} 过码`,
+      )
+      if (Number(solved?.retcode) === 0) {
+        globalThis.logger?.mark?.(`[Lotus-Plugin] dailyNote P${profileId} ${game} ${uid} 过码成功`)
+        return solved
+      }
+      globalThis.logger?.warn?.(
+        `[Lotus-Plugin] dailyNote P${profileId} ${game} ${uid} 过码未通过：retcode=${solved?.retcode} ${solved?.message || ""}`,
+      )
+      return null
+    } catch (error) {
+      globalThis.logger?.warn?.(`[Lotus-Plugin] dailyNote P${profileId} ${game} ${uid} 过码异常：${error.message}`)
+      return null
     }
   }
 }
@@ -355,8 +483,11 @@ function formatSeconds(seconds) {
 }
 
 async function loadGenshinMysApi() {
+  // mysApi.js 顶层 `import { cfg } from "#index"`，运行时加载会与 #index 形成
+  // 循环依赖、首次求值命中 TDZ（Cannot access 'Data' before initialization）。
+  // 统一交给 genshinBridge/load.js 处理（重试一次 + 缓存）。
   const file = path.join(process.cwd(), "plugins", "genshin", "model", "mys", "mysApi.js")
-  return (await import(pathToFileURL(file).href)).default
+  return importGenshinModule(file)
 }
 
 function applyServerToMysApi(api, server) {

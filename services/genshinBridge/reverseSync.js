@@ -9,7 +9,7 @@
  */
 
 import path from "node:path"
-import { pathToFileURL } from "node:url"
+import { importGenshinModule } from "./load.js"
 import {
   ensureProfile,
   loadProfile,
@@ -206,7 +206,7 @@ export async function autoSyncGenshinToLotus() {
 
 async function loadGenshinModels() {
   const base = path.join(process.cwd(), "plugins", "genshin", "model", "mys")
-  const NoteUser = (await import(pathToFileURL(path.join(base, "NoteUser.js")).href)).default
-  const MysUser = (await import(pathToFileURL(path.join(base, "MysUser.js")).href)).default
+  const NoteUser = await importGenshinModule(path.join(base, "NoteUser.js"))
+  const MysUser = await importGenshinModule(path.join(base, "MysUser.js"))
   return { NoteUser, MysUser }
 }

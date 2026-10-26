@@ -23,6 +23,10 @@ export const testNineProvider = {
         }),
         {
           timeoutMs: config.timeout_ms || 20000,
+          // 打码是一次性的：同一个 gt/challenge 重放会二次消耗挑战，
+          // 大概率直接拿到 challenge_used。所以必须一次成功，
+          // 绕过本进程内已损坏的 undici body 流，直接走 node:http。
+          preferNative: true,
         },
         context,
       )

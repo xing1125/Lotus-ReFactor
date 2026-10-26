@@ -111,33 +111,37 @@ export class StarRailChallengeService {
       scheduleType,
     }
 
-    // 【精装版】只走详细请求（need_all=true），不再降级简易：
-    // 详细接口失败直接抛错出失败卡，避免渲染出缺关卡的残缺卡片。
-    const res = await this.requestChallenge({ ...requestOptions, detailed: true })
+    // 对齐 mys 系星铁挑战接口：仅传 schedule_type（+ story/boss 额外带 time），
+    // 不再附加 isPrev/need_all（空 isPrev 会让 story/boss 端点返回 invalid request）。
+    // 详情数据（all_floor_detail）在无 need_all 时由接口默认全量返回。
+    const timeParam = (meta.kind === "story" || meta.kind === "boss")
+      ? (parsed.last || parsed.recent ? "1" : "0")
+      : undefined
+    const res = await this.requestChallenge({ ...requestOptions, timeParam })
     if (!isOkResponse(res)) throw mihoyoResponseError(res, meta.label)
+    const hasData = res.data?.has_data !== false
 
     return normalizeChallengeResult({
       data: res.data || {},
       uid,
       meta,
       scheduleType,
+      time: timeParam || "0",
+      hasData,
       simple: false,
       recent: parsed.recent,
       currentType: TYPE_META[currentChallengeKind()].index,
     })
   }
 
-  async requestChallenge({ uid, server, isCn, cookie, profile, deviceFp, deviceId, endpoint, scheduleType, detailed = true } = {}) {
+  async requestChallenge({ uid, server, isCn, cookie, profile, deviceFp, deviceId, endpoint, scheduleType, timeParam } = {}) {
     const host = isCn ? "https://api-takumi-record.mihoyo.com" : "https://bbs-api-os.hoyolab.com"
     const query = new URLSearchParams({
       role_id: uid,
       schedule_type: scheduleType,
       server,
     })
-    if (detailed) {
-      query.set("isPrev", "")
-      query.set("need_all", "true")
-    }
+    if (timeParam) query.set("time", timeParam)
     const queryText = query.toString()
     const url = `${host}/game_record/app/hkrpg/api/${endpoint}?${queryText}`
     const headers = buildHeaders({
@@ -226,13 +230,37 @@ function currentChallengeKind(now = Date.now()) {
   return ["boss", "story", "hall"][period % 3]
 }
 
-function normalizeChallengeResult({ data, uid, meta, scheduleType, simple, recent, currentType } = {}) {
+function normalizeChallengeResult({ data, uid, meta, scheduleType, time = "0", hasData = true, simple, recent, currentType } = {}) {
+  // 接口 has_data=false：该 profile 未打过此挑战，返回空结构，由渲染层画「暂无数据」
+  if (!hasData) {
+    return {
+      uid,
+      kind: meta.kind,
+      label: meta.label,
+      challengeType: meta.index,
+      scheduleType,
+      period: "",
+      simple,
+      current: currentType === meta.index,
+      hasData: false,
+      stars: "",
+      extraStars: "",
+      maxFloor: "",
+      battleNum: "",
+      floors: [],
+      peak: null,
+    }
+  }
+
   const activeData = { ...data }
-  if (Array.isArray(activeData.groups) && activeData.groups.length > 1) {
-    const activeGroup = scheduleType === "1"
-      ? activeData.groups.find(group => group.status === "New")
-      : activeData.groups.find(group => group.status === "End")
-    if (activeGroup) activeData.groups = [activeGroup]
+  // groups 在新端点下是 { "0": 本期, "1": 上期 } 对象（旧 challenge 端点才是数组），按 time 取当期
+  let group
+  if (Array.isArray(activeData.groups)) {
+    group = activeData.groups[0] || {}
+  } else if (activeData.groups && typeof activeData.groups === "object") {
+    group = activeData.groups[String(time)] || activeData.groups["0"] || {}
+  } else {
+    group = {}
   }
 
   let period = ""
@@ -248,10 +276,9 @@ function normalizeChallengeResult({ data, uid, meta, scheduleType, simple, recen
     peak = selected.map(record => formatPeakRecord(record, activeData))
     period = peak[0]?.period || ""
   } else {
-    const group = activeData.groups?.[0] || {}
     period = [
-      formatMihoyoTime(meta.index === TYPE_META.hall.index ? activeData.begin_time : group.begin_time),
-      formatMihoyoTime(meta.index === TYPE_META.hall.index ? activeData.end_time : group.end_time),
+      formatMihoyoTime(group.begin_time),
+      formatMihoyoTime(group.end_time),
     ].filter(Boolean).join(" - ")
     floors = (activeData.all_floor_detail || [])
       .filter(floor => !floor?.is_fast)
@@ -268,6 +295,7 @@ function normalizeChallengeResult({ data, uid, meta, scheduleType, simple, recen
     period,
     simple,
     current: currentType === meta.index,
+    hasData: true,
     stars: activeData.star_num ?? activeData.total_star ?? "",
     extraStars: activeData.extra_star_num ?? "",
     maxFloor: activeData.max_floor ?? "",

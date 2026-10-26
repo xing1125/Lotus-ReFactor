@@ -1,7 +1,7 @@
 const BasePlugin = globalThis.plugin
 
 import { randomUUID } from "node:crypto"
-import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
+import { resolvePriority } from "../core/intercept/priority.js"
 import { loadGlobalConfig } from "../core/config/global.js"
 import { PermissionService } from "../core/permissions/service.js"
 import { renderTemplate, renderStatusCard } from "../core/render/service.js"
@@ -13,7 +13,7 @@ import { buildMediaMessageText, articlePages } from "../services/media/message.j
 export class LotusDouyin extends BasePlugin {
   constructor() {
     super({
-      name: "[Lotus-Plugin] Douyin", dsc: "Lotus Douyin parser", event: "message", priority: LOTUS_INTERCEPT_PRIORITY,
+      name: "[Lotus-Plugin] Douyin", dsc: "Lotus Douyin parser", event: "message", priority: resolvePriority("douyin"),
       rule: [
         { reg: "^#抖音(?:下载|下视频)\\s+[\\s\\S]+$", fnc: "downloadWork" },
         { reg: "https?://(?:[a-zA-Z0-9-]+\\.)?(?:douyin|iesdouyin)\\.com/", fnc: "parse" },
