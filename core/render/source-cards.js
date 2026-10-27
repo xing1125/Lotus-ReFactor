@@ -327,11 +327,12 @@ function checkin(p,data){
  }
  messageBlock(p,data.message)
 }
-// 签到游戏状态表（checkin-result 主体）：深色行 + 语义状态胶囊
+// 签到游戏状态表（checkin-result 主体）：深色行 + 语义状态胶囊 + 天数 / 奖励列
 function gamesTable(p,rows){
  const {WHITE,HEADER}=DARK
  const x=UI.SIDE,w=p.width-UI.SIDE*2,pad=UI.PAD
- const c1=Math.round(w*0.36),c2=Math.round(w*0.32),c3=w-c1-c2
+ // 5 列：游戏/社区 | 游戏签到 | 社区签到 | 天数 | 奖励（奖励列最宽，容纳「物品 ×N」）
+ const c1=Math.round(w*0.27),c2=Math.round(w*0.15),c3=Math.round(w*0.15),c4=Math.round(w*0.13),c5=w-c1-c2-c3-c4
  const rowH=46,headH=42
  const h=headH+rows.length*rowH
  openPanel(p,x,p.y,w,h,UI.R.panel,DARK.PANEL,2,'solid')
@@ -342,12 +343,16 @@ function gamesTable(p,rows){
  p.text('游戏 / 社区',x+pad,hy,c1-pad-8,UI.T.label[0],DARK.LABEL,headOpt)
  p.text('游戏签到',x+c1,hy,c2-8,UI.T.label[0],DARK.LABEL,headOpt)
  p.text('社区签到',x+c1+c2,hy,c3-pad-8,UI.T.label[0],DARK.LABEL,headOpt)
+ p.text('天数',x+c1+c2+c3,hy,c4-8,UI.T.label[0],DARK.LABEL,{...headOpt,align:'center'})
+ p.text('奖励',x+c1+c2+c3+c4+4,hy,c5-pad-12,UI.T.label[0],DARK.LABEL,headOpt)
  let ry=p.y+headH
  rows.forEach((r,i)=>{
   if(i%2===1)p.rect(x,ry,w,rowH,DARK.STRIPE)
   p.text(r.label||'-',x+pad,ry+15,c1-pad-8,UI.T.body[0],WHITE,{leading:UI.T.body[1],singleLine:true,minSize:11})
   pill(p,r.game||'未执行',x+c1,ry+13,c2-16)
   pill(p,r.community||'未执行',x+c1+c2,ry+13,c3-pad-8)
+  p.text(r.days||'-',x+c1+c2+c3,ry+15,c4-8,UI.T.body[0],WHITE,{leading:UI.T.body[1],singleLine:true,minSize:10,align:'center'})
+  p.text(r.reward||'-',x+c1+c2+c3+c4+4,ry+15,c5-pad-12,UI.T.body[0],DARK.SUB_TEXT||WHITE,{leading:UI.T.body[1],singleLine:true,minSize:10})
   if(i<rows.length-1)p.rule(x+pad,ry+rowH-1,w-pad*2,DARK.LINE)
   ry+=rowH
  })

@@ -12,6 +12,53 @@ from pathlib import Path
 MIHOYO_BBS_VERSION = "2.102.1"
 
 
+def patch_bbstools_http():
+    # MihoyoBBSTools/request.py 默认 httpx.Client(timeout=30, HTTPTransport(retries=10))，
+    # 单个请求最坏 30s×11≈330s；米游社接口一旦卡顿/被限流，就会被 runner 的 180s 总超时强杀，
+    # 表现为「出图慢 + 大量 180000ms 超时」（见 data/audit/checkin.jsonl 的连续超时）。
+    # 这里不在上游 request.py 上加改动，而是在本 runner 进程内把 http 客户端的超时/重试收敛到合理区间：
+    # 单请求上限从 ~330s 降到 ~100s，让偶发卡顿能快速失败或恢复，而不是把整个 runner 拖到被杀。
+    # 可通过环境变量微调：LOTUS_BBS_HTTP_TIMEOUT（默认 25s）/ LOTUS_BBS_HTTP_RETRIES（默认 3）。
+    try:
+        import sys
+        import httpx
+        import request as _req
+
+        timeout = float(os.environ.get("LOTUS_BBS_HTTP_TIMEOUT", "25"))
+        retries = int(os.environ.get("LOTUS_BBS_HTTP_RETRIES", "3"))
+
+        def patched_get_new_session(**kwargs):
+            try:
+                kw = dict(kwargs)
+                kw.setdefault("timeout", timeout)
+                if "transport" not in kw:
+                    kw["transport"] = httpx.HTTPTransport(retries=retries)
+                kw.setdefault("follow_redirects", True)
+                return httpx.Client(**kw)
+            except (TypeError, ModuleNotFoundError):
+                import requests
+                from requests.adapters import HTTPAdapter
+                session = requests.Session()
+                session.mount("http://", HTTPAdapter(max_retries=retries))
+                session.mount("https://", HTTPAdapter(max_retries=retries))
+                return session
+
+        new_client = patched_get_new_session()
+        old_http = _req.http
+        old_get = _req.get_new_session
+        # 修正所有 `from request import http` / `from request import get_new_session` 的模块级绑定
+        # （Python 的 from-import 会复制引用，改 _req.http 不会自动跟随，必须逐个重指）。
+        for mod in list(sys.modules.values()):
+            if getattr(mod, "http", None) is old_http:
+                mod.http = new_client
+            if getattr(mod, "get_new_session", None) is old_get:
+                mod.get_new_session = patched_get_new_session
+        _req.http = new_client
+        _req.get_new_session = patched_get_new_session
+    except Exception as exc:  # 打补丁失败不应阻断签到，回退到上游默认行为
+        print(f"[Lotus] patch_bbstools_http skipped: {exc}")
+
+
 class LotusJsonLogHandler(logging.Handler):
     def __init__(self, event_file: str, context: dict):
         super().__init__()
@@ -134,6 +181,7 @@ def run(args):
     import config
     patch_bbstools_version(args.mihoyobbs_version)
     import main
+    patch_bbstools_http()
     from error import CookieError, StokenError
 
     config.config_Path = str(config_file)
@@ -186,7 +234,14 @@ def parse_args():
     parser.add_argument("--event-file", default="")
     parser.add_argument("--result-file", default="")
     parser.add_argument("--captcha-dir", default="")
-    parser.add_argument("--captcha-timeout", type=int, default=240)
+    parser.add_argument(
+        "--captcha-timeout",
+        type=int,
+        # 打码桥最坏等待：仅在米游社真正弹出验证码、且 node 侧没写回响应时才会拖满。
+        # 旧值 240s 会把这个异常分支的最坏时间放大到 runner 总超时附近；收敛到 60s
+        # （可通过 LOTUS_BBS_CAPTCHA_TIMEOUT 微调），让打码异常也能快速失败，而不是拖慢整次出图。
+        default=int(os.environ.get("LOTUS_BBS_CAPTCHA_TIMEOUT", "60")),
+    )
     parser.add_argument("--mihoyobbs-version", default=MIHOYO_BBS_VERSION)
     parser.add_argument("--task-id", default="")
     parser.add_argument("--user-id", default="")
