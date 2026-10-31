@@ -18,6 +18,17 @@ const ATLAS_CHALLENGE_SCOPE_ARGS = Object.freeze([
 
 export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
   version: CURRENT_GLOBAL_CONFIG_VERSION,
+  // 上游 1aa94b2/9dbf851/a8c736c 新增：货币商店（coin shop）自动兑换 + 带鉴权 Web 管理页
+  coin_shop: {
+    enable: true,
+    mode: "auto",
+    host: "127.0.0.1",
+    port: 18164,
+    path: "/lotus/coin-shop",
+    public_url: "",
+    icp_number: "",
+    session_hours: 8,
+  },
   // 功能模块开关（锅巴「功能开关」）：键 = core/config/modules.js 注册表 id。
   // 缺省 / true = 启用；显式 false = 关闭（命令回复提示并吞掉）。签到链路走 scheduler.* 独立开关，不在此列。
   modules: {},
@@ -176,7 +187,7 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
     download_retries: 3,
     bbdown: {
       enable: true,
-      repo: "nilaoda/BBDown",
+      repo: "MOPELotus/BBDown",
       command: "BBDown",
     },
     ffmpeg: {

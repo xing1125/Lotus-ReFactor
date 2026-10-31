@@ -33,6 +33,8 @@
   - [队伍伤害-原神](features/team-damage-genshin.md)
   - [队伍伤害-星铁](features/team-damage-starrail.md)
   - [挑战查询-图鉴期数](features/challenge-query.md)
+  - [前瞻兑换码-官方活动与有效期](features/redeem-codes.md)
+  - [米游币兑换网页-商品与定时预约](features/coin-shop.md)
 
 ## 图鉴与成就
 

@@ -142,6 +142,11 @@ export const LOTUS_CONFIG_DISABLED_PLUGIN_NAMES = Object.freeze([
   // miao wiki overlaps. Keep 角色查询/角色面板 for cards and panel transform.
   "角色资料",
 
+  // 上游 a8c736c/2ce1221：兑换码功能由 Lotus 全权接管（原神直播码 + 各游戏），
+  // genshin 的兑换动作与 ZZZ-Plugin 的 Code 查询一并禁用，避免双答。
+  "兑换码",
+  "[ZZZ-Plugin]Code",
+
   // Nwflower/Atlas overlaps
   "Atlas图鉴",
   "Atlas图鉴管理",

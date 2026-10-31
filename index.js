@@ -5,6 +5,7 @@ import { isModuleEnabled, moduleLabel, MODULE_BY_APP_FILE } from "./core/config/
 import { replyText } from "./core/transport/reply.js"
 import { autoStartTestNineServer } from "./services/testNine/server.js"
 import { checkTrackedSubmoduleRemoteUpdates, syncTrackedSubmodules } from "./services/pluginUpdate/service.js"
+import { scheduleBBDownStartupUpdate } from "./services/tools/startup.js"
 
 const pluginName = "Lotus-Plugin"
 const appsDir = new URL("./apps/", import.meta.url)
@@ -17,6 +18,11 @@ await ensureGlobalConfig().then(result => {
   if (result.created) logger?.mark?.(`[${pluginName}] created default config: ${result.file}`)
 }).catch(error => {
   logger?.warn?.(`[${pluginName}] global config init skipped: ${error.message}`)
+})
+
+// 上游 8d2ed8f：BBDown 迁到 Lotus fork，启动期延迟检查工具更新
+void scheduleBBDownStartupUpdate(startupConfig).catch(error => {
+  logger?.warn?.(`[${pluginName}] BBDown startup check failed: ${error.message}`)
 })
 
 // 只检查并通知，不在开机阶段自动改写子仓库，避免隐藏更新或阻塞启动。
