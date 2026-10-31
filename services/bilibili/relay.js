@@ -32,6 +32,11 @@ export function normalizeRelayConfig(config = {}) {
     enable: source.enable !== false,
     ttl_hours: Math.min(24 * 30, Math.max(0.1, Number(source.ttl_hours ?? 24) || 24)),
     max_total_size_mb: Math.max(0, Number(source.max_total_size_mb ?? 2048) || 0),
+    // 只有大视频才进中转：min_size_mb 为空时由调用方回退到微信视频上限（video_wx_limit_mb），
+    // 即「能作为视频消息直发的都不中转」。显式配 0 = 恢复全量中转。
+    min_size_mb: source.min_size_mb === undefined || source.min_size_mb === null
+      ? null
+      : Math.max(0, Number(source.min_size_mb) || 0),
   }
 }
 

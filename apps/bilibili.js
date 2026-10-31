@@ -395,12 +395,15 @@ export async function sendBiliFile(e, file, config = {}) {
   const videoLimitMb = Number(config.video_size_limit_mb || 100)
   const wxLimitMb = normalizeWechatVideoLimitMb(config.video_wx_limit_mb)
 
-  // 视频一律优先走 HTTP 中转：彻底绕开 hook 微信的文件/视频发送通道，
-  // 避免客户端崩溃（2026-10-28 实测 16MB 文件发送后 5 秒 WeChatWin.dll 崩溃）。
-  // 仅在 HTTP 中转不可用时才应急走原通道。
+  // 视频发送策略（按大小分流）：
+  //   - 小于 video_relay.min_size_mb（缺省 = 微信视频上限 video_wx_limit_mb）→ 走原通道
+  //     直发视频消息（超限先压缩），彻底不碰中转；
+  //   - 达到阈值才优先进 HTTP 中转（绕开 hook 微信文件/视频通道的 WeChatWin.dll 崩溃，
+  //     2026-10-28 实测 16MB 文件发送后 5 秒崩溃），中转不可用再回退原通道。
   if (isVideoFile(file)) {
     const relayCfg = normalizeRelayConfig(config)
-    if (relayCfg.enable) {
+    const relayMinMb = relayCfg.min_size_mb === null ? wxLimitMb : relayCfg.min_size_mb
+    if (relayCfg.enable && sizeMb >= relayMinMb) {
       const relay = await buildRelayLink(file, path.basename(file), relayCfg)
       if (relay.ok) {
         const ttlText = relay.ttlHours >= 1 ? `${relay.ttlHours} 小时` : `${Math.round(relay.ttlHours * 60)} 分钟`
@@ -412,7 +415,7 @@ export async function sendBiliFile(e, file, config = {}) {
       }
       logger?.warn?.(`[Lotus-Plugin] Bilibili relay unavailable: ${relay.reason}`)
     }
-    // 中转不可用时的应急兜底（仍可能走微信文件通道，仅 HTTP 服务未就绪时触发）
+    // 直发兜底：小视频（低于中转阈值）本就走这里；大视频在中转不可用时也回退到这里
     if (sizeMb <= videoLimitMb && globalThis.segment?.video) {
       const result = await sendBiliVideoMessage(e, file, config, { sizeMb, wxLimitMb })
       if (result.ok) return

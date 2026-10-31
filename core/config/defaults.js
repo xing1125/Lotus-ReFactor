@@ -244,6 +244,9 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
         enable: true,
         ttl_hours: 10 / 60, // 10 分钟：中转链接超时就失效并清理，避免占用本地存储
         max_total_size_mb: 2048,
+        // 只有达到该大小（MB）才进中转；缺省 null = 回退到 video_wx_limit_mb，
+        // 即「能作为视频消息直发的不中转」。配 0 = 全部进中转。
+        min_size_mb: null,
       },
       max_estimated_size_mb: 0,
       multi_page_policy: "zip",
