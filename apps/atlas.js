@@ -10,9 +10,26 @@ import {
   buildAtlasShortcutRules,
   NanokaAtlasService,
   parseAtlasShortcutMessage,
+  resetAtlasAliasCache,
   selectAtlasTemplate,
 } from "../services/nanokaAtlas/service.js"
 import { AtlasUpdateService, readLocalVersionSnapshot } from "../services/nanokaAtlas/update.js"
+import { findGuideCard, guideCardStats } from "../services/nanokaAtlas/guide-cards.js"
+
+// view.kind → 图鉴三模块（成品卡目录）
+const GUIDE_KIND_BY_VIEW = { character: "character", weapon: "weapon", relic: "artifact" }
+const GUIDE_KIND_LABEL = { character: "角色攻略", weapon: "武器图鉴", relic: "圣遗物图鉴" }
+
+// 查图鉴插件的成品卡；命中返回可直接发送的图片段，否则 null（由调用方回退渲染）
+function findPresetGuideCard(data) {
+  const kind = GUIDE_KIND_BY_VIEW[data.view?.kind]
+  if (!kind) return null
+  const title = data.view?.title || data.title
+  const file = findGuideCard(kind, title)?.file
+  if (!file) return null
+  // 与 core/render 其它渲染器保持一致：优先包装成图片段，无 segment 时退回本地路径
+  return globalThis.segment?.image ? globalThis.segment.image(`file://${file}`) : `file://${file}`
+}
 
 export class LotusAtlas extends BasePlugin {
   constructor() {
@@ -64,6 +81,9 @@ export class LotusAtlas extends BasePlugin {
   }
 
   async refreshShortcutRoutes(options = {}) {
+    // 别名源（xiaoyao Atlas_alias/*.yaml 等）可能已变动，先让别名缓存失效，
+    // 使本次路由刷新重建时重新读取最新别名，实现热重载（无需重启 bot）。
+    resetAtlasAliasCache()
     const result = await buildAtlasShortcutRules(options)
     this.rule = composeAtlasRules(result.rules || [])
     this.shortcutRouteStats = result.stats || { rules: 0 }
@@ -73,6 +93,12 @@ export class LotusAtlas extends BasePlugin {
 
   async status() {
     const status = await new NanokaAtlasService().status()
+    const cards = guideCardStats()
+    const cardText = [
+      `角色 ${cards.character?.count || 0}`,
+      `武器 ${cards.weapon?.count || 0}`,
+      `圣遗物 ${cards.artifact?.count || 0}`,
+    ].join(" / ")
     const image = await renderStatusCard({
       title: "图鉴状态",
       subtitle: status.root,
@@ -86,6 +112,8 @@ export class LotusAtlas extends BasePlugin {
         { label: "Modules", value: status.itemsReady ? `${status.moduleCount} 个模块` : "缺失" },
         { label: "Gallery", value: status.galleryReady ? "已找到" : "缺失" },
         { label: "Locale", value: status.locale },
+        { label: "成品卡", value: cardText },
+        { label: "卡面来源", value: Object.values(cards).some(c => c.source === "local") ? "Lotus 本地" : "借 Atlas 源" },
       ],
     }, {
       saveId: `lotus-atlas-status-${this.e.user_id || "user"}`,
@@ -388,6 +416,10 @@ async function renderAtlasSearchResult(result, userId) {
 
 export async function sendAtlasSearchResult(target, result, options = {}) {
   const data = buildAtlasRenderData(result)
+  // 优先直发图鉴插件的成品卡（角色攻略 / 武器图鉴 / 圣遗物图鉴三模块），
+  // 视觉与原插件完全一致；只在没有成品图时才走 nanoka 数据渲染兜底。
+  const preset = options.disablePresetCard ? null : findPresetGuideCard(data)
+  if (preset) return replyImage(target, preset, `${data.title} · ${GUIDE_KIND_LABEL[data.view?.kind] || "图鉴"}`)
   if (selectAtlasTemplate(data) === "atlas-item" && data.view) {
     const images = await (options.renderBook || renderAtlasBook)(data, { saveId: `lotus-atlas-${target.e?.user_id || "user"}` })
     // Every character suffix produces the complete book, with one image per node.

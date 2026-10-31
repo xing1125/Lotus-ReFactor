@@ -9,6 +9,7 @@ import {
 import { solveCaptcha } from "../../core/captcha/service.js"
 import { decodeProcessChunk, PythonEnvService, withUtf8ProcessEnv } from "../python/env.js"
 import { buildBbsToolsConfig } from "./config.js"
+import { loadGlobalConfig } from "../../core/config/global.js"
 
 // 签到整体超时。签到要跑多个游戏 + 可能等待打码，会比体力重得多，
 // 但没有上限就是隐患：Python 侧一旦卡在 httpx 请求或验证码轮询上，
@@ -34,7 +35,13 @@ export class MihoyoBbsToolsRunner {
 
     await fs.mkdir(workDir, { recursive: true })
     await fs.mkdir(captchaDir, { recursive: true })
-    await fs.writeFile(configFile, YAML.stringify(buildBbsToolsConfig(profile)), "utf8")
+    // 全局任务开关（checkin.bbs）：每次运行现读，改 yaml 后下一轮即生效，不用重载插件。
+    const globalConfig = await loadGlobalConfig().catch(() => null)
+    await fs.writeFile(
+      configFile,
+      YAML.stringify(buildBbsToolsConfig(profile, { bbs: globalConfig?.checkin?.bbs })),
+      "utf8",
+    )
 
     const python = options.ensureVenv === false
       ? await this.python.getPythonExecutable()
@@ -116,7 +123,7 @@ export class MihoyoBbsToolsRunner {
         )
         error.timeout = true
         error.stderr = stderr
-        logger?.error?.(`[Lotus-Plugin] bbs runner timeout ${totalTimeoutMs}ms, pid=${child.pid}`)
+        globalThis.logger?.error?.(`[Lotus-Plugin] bbs runner timeout ${totalTimeoutMs}ms, pid=${child.pid}`)
         reject(error)
       }, totalTimeoutMs)
 
@@ -180,7 +187,7 @@ async function cleanupWorkDir(dir) {
     await fs.rm(dir, { recursive: true, force: true })
     return
   } catch (error) {
-    logger?.warn?.(`[Lotus-Plugin] workDir fs.rm 失败，回退 rmdir：${error?.message || error}`)
+    globalThis.logger?.warn?.(`[Lotus-Plugin] workDir fs.rm 失败，回退 rmdir：${error?.message || error}`)
   }
   try {
     if (process.platform === "win32") {
@@ -196,7 +203,7 @@ async function cleanupWorkDir(dir) {
     }
     await fs.rm(dir, { recursive: true, force: true })
   } catch (error) {
-    logger?.warn?.(`[Lotus-Plugin] workDir 清理最终失败（残留不影响功能）：${dir} / ${error?.message || error}`)
+    globalThis.logger?.warn?.(`[Lotus-Plugin] workDir 清理最终失败（残留不影响功能）：${dir} / ${error?.message || error}`)
   }
 }
 
@@ -214,7 +221,7 @@ export function watchCaptchaRequests(captchaDir, options = {}) {
       if (!file.endsWith(".request.json") || handled.has(file)) continue
       handled.add(file)
       handleCaptchaRequest(path.join(captchaDir, file), options).catch(error => {
-        logger?.error?.(`[Lotus-Plugin] captcha bridge failed: ${error.stack || error.message}`)
+        globalThis.logger?.error?.(`[Lotus-Plugin] captcha bridge failed: ${error.stack || error.message}`)
       })
     }
   }, 500)

@@ -53,7 +53,19 @@ const ALIAS_CACHE = {
   loaded: false,
   map: new Map(),
 }
+
+// 使别名缓存失效：xiaoyao Atlas_alias/*.yaml 改动后，下次 loadAtlasAliasMap 会重新读取。
+// 由 refreshShortcutRoutes（#更新图鉴 / #重置图鉴 / 每日 0 点 cron）调用，实现别名热重载，无需重启 bot。
+export function resetAtlasAliasCache() {
+  ALIAS_CACHE.loaded = false
+  ALIAS_CACHE.map = new Map()
+}
 const ATLAS_PAGE_INDEX_CACHE = new Map()
+// 物品（材料）详情缓存：用于给养成材料补「秘境开放星期」批注。
+// key = `${root}|${localeFolder}|${gameFolder}` → Map(材料名 → { week, type, source_list } | null)
+const MATERIAL_META_CACHE = new Map()
+// 物品目录下的稀有度子目录列表缓存：key 同上 → string[]（目录绝对/相对路径）
+const MATERIAL_DIR_CACHE = new Map()
 const NUMERIC_TOKEN_RE = /[-+]?\d+(?:\.\d+)?%?/g
 
 const GENSHIN_THEATER_DIFFICULTY_LABELS = Object.freeze({
@@ -344,6 +356,18 @@ const ZZZ_ICON_MAP_LABELS = Object.freeze({
   Icon_GeneralBuff_Frost: "霜寒",
 })
 
+// 图鉴只暴露「最实用的三块」：角色 / 武器（光锥·音擎）/ 圣遗物（遗器套装·驱动盘）。
+// 食物、成就、摆设、七圣召唤、文本链接、敌人等一律不进索引，也不出现在搜索结果里。
+// 「物品 / 物品详情」必须继续留在磁盘上：它们是养成材料的图标来源，也是星期批注 week 字段的来源，
+// 但只作为查找表使用（getAtlasPageIndex 直接扫目录，不依赖索引），不参与搜索。
+// 可用 config.atlas.pages 覆盖（传数组，如 ["角色","武器","圣遗物","邦布"]）。
+const DEFAULT_CORE_ATLAS_PAGES = ["角色", "武器", "光锥", "音擎", "圣遗物", "遗器套装", "驱动盘"]
+
+function resolveCoreAtlasPages(pages) {
+  if (Array.isArray(pages) && pages.length) return new Set(pages.map(page => String(page)))
+  return new Set(DEFAULT_CORE_ATLAS_PAGES)
+}
+
 const PAGE_PRIORITY = Object.freeze({
   角色: 240,
   武器: 220,
@@ -401,7 +425,7 @@ export class NanokaAtlasService {
       }
     }
 
-    const index = await loadAtlasIndex(root, locale, this.fs)
+    const index = await loadAtlasIndex(root, locale, this.fs, config.pages)
     const results = challenge
       ? await findChallengeResults(index, challenge, root, this.fs, maxResults)
       : await findSearchResults(index, keyword, root, this.fs, maxResults, {
@@ -451,7 +475,7 @@ export class NanokaAtlasService {
     const config = this.config || (await loadGlobalConfig()).atlas || {}
     const root = resolveAtlasRoot(options.dataRoot || config.data_root)
     const locale = options.locale || config.locale || "简体中文"
-    const index = await loadAtlasIndex(root, locale, this.fs)
+    const index = await loadAtlasIndex(root, locale, this.fs, config.pages)
     return index.modules
   }
 
@@ -461,7 +485,7 @@ export class NanokaAtlasService {
     const config = this.config || (await loadGlobalConfig()).atlas || {}
     const root = resolveAtlasRoot(options.dataRoot || config.data_root)
     const locale = options.locale || config.locale || "简体中文"
-    const index = await loadAtlasIndex(root, locale, this.fs)
+    const index = await loadAtlasIndex(root, locale, this.fs, config.pages)
     for (const entry of index.entries) {
       try {
         const item = await readAtlasItem(entry.file, root, this.fs, entry)
@@ -476,7 +500,7 @@ export class NanokaAtlasService {
     const config = this.config || (await loadGlobalConfig()).atlas || {}
     const root = resolveAtlasRoot(options.dataRoot || config.data_root)
     const locale = options.locale || config.locale || "简体中文"
-    const index = await loadAtlasIndex(root, locale, this.fs)
+    const index = await loadAtlasIndex(root, locale, this.fs, config.pages)
     const groups = new Map()
 
     for (const entry of index.entries) {
@@ -566,7 +590,7 @@ export async function buildAtlasShortcutRules(options = {}) {
     }
   }
 
-  const index = await loadAtlasIndex(root, locale, fsImpl)
+  const index = await loadAtlasIndex(root, locale, fsImpl, config.pages)
   const aliasMap = await loadAtlasAliasMap()
   const directNamesByPrefix = new Map()
   const roleNamesByGame = new Map()
@@ -1140,11 +1164,12 @@ function buildChallengePeriodNote(challenge, item) {
   ].filter(Boolean).join("\n")
 }
 
-async function loadAtlasIndex(root, locale, fsImpl) {
+async function loadAtlasIndex(root, locale, fsImpl, corePages) {
   const mapFile = path.join(root, "data", "map.json")
   const itemsRoot = path.join(root, "data", "items", locale)
   const stat = await safeStat(mapFile, fsImpl)
-  const cacheKey = `${root}|${locale}|${stat?.mtimeMs || "no-map"}`
+  const pages = resolveCoreAtlasPages(corePages)
+  const cacheKey = `${root}|${locale}|${stat?.mtimeMs || "no-map"}|${[...pages].sort().join(",")}`
   const cached = INDEX_CACHE.get(cacheKey)
   if (cached) return cached
 
@@ -1152,9 +1177,9 @@ async function loadAtlasIndex(root, locale, fsImpl) {
   if (stat) {
     const raw = await fsImpl.readFile(mapFile, "utf8")
     const map = JSON.parse(raw)
-    index = buildIndexFromMap(map, root, locale, itemsRoot)
+    index = buildIndexFromMap(map, root, locale, itemsRoot, pages)
   } else {
-    index = await buildIndexFromFiles(root, locale, fsImpl)
+    index = await buildIndexFromFiles(root, locale, fsImpl, pages)
   }
 
   INDEX_CACHE.clear()
@@ -1162,8 +1187,9 @@ async function loadAtlasIndex(root, locale, fsImpl) {
   return index
 }
 
-function buildIndexFromMap(map, root, locale, itemsRoot) {
+function buildIndexFromMap(map, root, locale, itemsRoot, pages) {
   const localeId = LOCALE_IDS[locale] || "zh"
+  const corePages = pages || resolveCoreAtlasPages()
   const entries = []
   const modules = []
 
@@ -1175,6 +1201,8 @@ function buildIndexFromMap(map, root, locale, itemsRoot) {
 
     for (const [pageId, page] of Object.entries(localeBlock.pages)) {
       const pageLabel = page.folder || page.title || pageId
+      // 只保留核心三块；其余页（食物/成就/摆设/七圣召唤/…）不进索引也不参与搜索
+      if (!corePages.has(pageLabel)) continue
       const records = Object.values(page.records || {})
       const module = {
         gameId,
@@ -1237,10 +1265,16 @@ function sampleEntryScore(entry) {
   return score
 }
 
-async function buildIndexFromFiles(root, locale, fsImpl) {
+async function buildIndexFromFiles(root, locale, fsImpl, pages) {
+  const corePages = pages || resolveCoreAtlasPages()
   const itemsRoot = path.join(root, "data", "items", locale)
   const candidates = await findCandidateFiles(itemsRoot, "", fsImpl)
-  const entries = candidates.map(candidate => {
+  const entries = candidates
+    .filter(candidate => {
+      const rel = path.relative(itemsRoot, candidate.file).split(path.sep)
+      return corePages.has(rel[1] || "")
+    })
+    .map(candidate => {
     const rel = path.relative(itemsRoot, candidate.file).split(path.sep)
     const [game, page, rarity] = rel
     return {
@@ -1317,8 +1351,8 @@ async function readAtlasItem(file, root, fsImpl, entry = {}) {
   const page = meta.pageFolder || entry.page || meta.pageId || ""
   const imageResolver = createImageResolver(root, meta.images, meta.gameId)
   const image = page === "角色"
-    ? imageResolver.first([/^icon$/, /^detail\.icon$/, /^derived\.avatarDrawCard$/, /^detail\.partner_info\.role_icon$/, /^(?:detail\.)?skin\.[^.]+\.image$/])
-    : resolveImage(root, meta.images)
+    ? imageResolver.first([/^icon$/, /^detail\.icon$/, /^derived\.avatarShopIcon$/, /^derived\.avatarDrawCard$/, /^detail\.partner_info\.role_icon$/, /^(?:detail\.)?skin\.[^.]+\.image$/])
+    : resolveImage(root, meta.images, meta.gameId)
   const challengePage = CHALLENGE_PAGE_NAMES.has(page)
   const item = {
     title,
@@ -1358,7 +1392,15 @@ async function readAtlasItem(file, root, fsImpl, entry = {}) {
   item.chips = buildChips(item)
   item.facts = extractFacts(meta, list, detail, item)
   item.sections = extractSections(item, list, detail)
-  item.view = buildItemView(item, list, detail, imageResolver)
+  // 养成材料的「秘境开放星期」来自物品记录的 week 字段，需要在同步构建视图前异步取到。
+  const materialMeta = await resolveMaterialMetaMap(
+    root,
+    meta.localeFolder || "",
+    meta.gameFolder || entry.game || "",
+    collectMaterialNames(detail),
+    fsImpl,
+  )
+  item.view = buildItemView(item, list, detail, imageResolver, materialMeta)
   item.view = normalizeVisibleText(item.view)
   item.sections = normalizeVisibleText(item.sections)
   item.facts = normalizeVisibleText(item.facts)
@@ -1395,31 +1437,20 @@ function displayRarity(meta, list, detail, entry) {
   return meta.rarity || entry.rarity || list.rank && `${list.rank}星` || list.rarity && `${list.rarity}星` || ""
 }
 
-function resolveImage(root, images = []) {
+function resolveImage(root, images = [], gameId = "") {
   const picked = images.find(item => item?.localPath && item.status === "downloaded" && !item.placeholder)
     || images.find(item => item?.localPath && !item.placeholder && item.status !== "failed")
-  if (!picked?.localPath) return ""
-  return pathToFileURL(path.join(root, picked.localPath)).href
+  if (picked?.localPath) return pathToFileURL(path.join(root, picked.localPath)).href
+  // 兜底：localPath 未同步（status=not_downloaded）时，按 originalValue 回退本地 gallery
+  for (const item of images) {
+    if (!item?.originalValue) continue
+    const file = path.join(root, "gallery", gameId || "", `${stripImageExt(String(item.originalValue))}.webp`)
+    if (existsSync(file)) return pathToFileURL(file).href
+  }
+  return ""
 }
 
 function createImageResolver(root, images = [], gameId = "") {
-  const entries = images
-    .filter(item => item?.localPath && item.status !== "failed" && !item.placeholder)
-    .map(item => ({
-      fieldPath: String(item.fieldPath || ""),
-      originalValue: String(item.originalValue || ""),
-      kind: String(item.kind || ""),
-      localPath: item.localPath,
-      url: pathToFileURL(path.join(root, item.localPath)).href,
-    }))
-  const match = (entry, pattern) => {
-    if (pattern instanceof RegExp) return pattern.test(entry.fieldPath)
-    const text = String(pattern)
-    return entry.fieldPath === text
-      || entry.fieldPath.includes(text)
-      || entry.localPath === text
-      || entry.localPath.includes(text)
-  }
   const localAsset = (names = [], overrideGameId = gameId) => {
     const list = Array.isArray(names) ? names : [names]
     for (const name of list.filter(Boolean)) {
@@ -1427,6 +1458,33 @@ function createImageResolver(root, images = [], gameId = "") {
       if (existsSync(file)) return pathToFileURL(file).href
     }
     return ""
+  }
+  const entries = images
+    .map(item => {
+      const originalValue = String(item.originalValue || "")
+      let url = ""
+      if (item?.localPath && item.status !== "failed" && !item.placeholder) {
+        url = pathToFileURL(path.join(root, item.localPath)).href
+      } else if (originalValue) {
+        // localPath 未同步（status=not_downloaded）时，按 originalValue 回退本地 gallery
+        url = localAsset([originalValue])
+      }
+      return {
+        fieldPath: String(item.fieldPath || ""),
+        originalValue,
+        kind: String(item.kind || ""),
+        localPath: item.localPath,
+        url,
+      }
+    })
+    .filter(entry => entry.url)
+  const match = (entry, pattern) => {
+    if (pattern instanceof RegExp) return pattern.test(entry.fieldPath)
+    const text = String(pattern)
+    return entry.fieldPath === text
+      || entry.fieldPath.includes(text)
+      || entry.localPath === text
+      || (entry.localPath && entry.localPath.includes(text))
   }
   return {
     first(patterns = []) {
@@ -1599,6 +1657,12 @@ async function loadAtlasAliasMap() {
     addAliasObject(aliases, readYamlAliasObject(file), "绝区零")
   }
 
+  // 原神攻略别名以 xiaoyao-cvs-plugin 的 Atlas_alias/*.yaml 为准（自维护、已落地本机）。
+  // xiaoyao 插件缺失时 uniqueExistingFiles 兜底跳过，不破坏现有链路。
+  for (const file of atlasXiaoyaoAliasFiles()) {
+    addAliasObject(aliases, readYamlAliasObject(file.path), file.game)
+  }
+
   ALIAS_CACHE.loaded = true
   ALIAS_CACHE.map = aliases
   return aliases
@@ -1639,6 +1703,44 @@ function atlasZzzPluginRoots() {
     path.join(process.cwd(), "plugins", "zzz-plugin"),
     path.join(rootPath, "reference-projects", "external", "ZZZ-Plugin"),
   ]
+}
+
+// 原神攻略别名来源：xiaoyao-cvs-plugin 的 Atlas_alias/*.yaml（武器/圣遗物/道具/秘境/原魔）。
+// 这些是我们本地自维护的别名数据，覆盖原神全量，格式为 { 标准名: [别名...] }，
+// 可直接喂给 readYamlAliasObject + addAliasObject。
+// 别名来源优先级：Lotus 内迁副本（resources/Atlas_alias）> xiaoyao 原路径（向后兼容兜底）。
+// 内迁后即使 xiaoyao 精简/删除 Atlas_alias，Lotus 别名依旧完整，可安全给 xiaoyao 减负。
+function atlasXiaoyaoAliasRoots() {
+  return [
+    path.join(process.cwd(), "plugins", "Lotus-Plugin"),
+    path.join(process.cwd(), "plugins", "xiaoyao-cvs-plugin"),
+    path.join(rootPath, "reference-projects", "external", "xiaoyao-cvs-plugin"),
+  ]
+}
+
+const XIAOYAO_ALIAS_FILES = [
+  { file: "juese_tujian.yaml", game: "原神" }, // 角色（常用昵称种子表）
+  { file: "wuqi_tujian.yaml", game: "原神" }, // 武器（含专武别名）
+  { file: "shengyiwu_tujian.yaml", game: "原神" }, // 圣遗物套装
+  { file: "daoju_tujian.yaml", game: "原神" }, // 道具 / 寻宝罗盘 / 共鸣石
+  { file: "mijin_tujian.yaml", game: "原神" }, // 秘境副本
+  { file: "yuanmo_tujian.yaml", game: "原神" }, // 原魔 / 周本 / 地方传奇
+]
+
+function atlasXiaoyaoAliasFiles() {
+  const files = []
+  // 按文件维度取「第一个命中的 root」：内迁副本优先，xiaoyao 原路径兜底。
+  // 这样每个别名文件只会加载一份，避免内外两份内容不一致时互相覆盖。
+  for (const { file, game } of XIAOYAO_ALIAS_FILES) {
+    for (const base of atlasXiaoyaoAliasRoots()) {
+      const candidate = path.join(base, "resources", "Atlas_alias", file)
+      if (existsSync(candidate)) {
+        files.push({ path: candidate, game })
+        break
+      }
+    }
+  }
+  return uniqueExistingFiles(files)
 }
 
 function uniqueExistingFiles(files) {
@@ -1747,8 +1849,35 @@ function readYamlAliasObject(file) {
   try {
     return parseYaml(readFileSync(file, "utf8"))
   } catch {
-    return null
+    // 容错：别名 yaml 偶发重复键（例如本仓库 shengyiwu_tujian.yaml 曾出现「血红之证」重复），
+    // 严格解析会抛错导致整文件被静默判空丢弃。此处退回合并式宽松解析，保证数据不丢。
+    try {
+      return parseAliasYamlTolerant(readFileSync(file, "utf8"))
+    } catch {
+      return null
+    }
   }
+}
+
+// 宽松别名 yaml 解析：仅支持「顶层 key: 后跟 - 值 列表」的形状，遇到重复 key 时合并而非抛错。
+// 仅作为 readYamlAliasObject 的兜底，正常情况走 yaml 的 parseYaml。
+function parseAliasYamlTolerant(text) {
+  const result = {}
+  let key = null
+  for (const raw of String(text).split(/\r?\n/)) {
+    const line = raw.replace(/\t/g, "  ")
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith("#")) continue
+    const indent = line.length - line.trimStart().length
+    if (indent === 0 && trimmed.endsWith(":")) {
+      key = trimmed.slice(0, -1).trim()
+      if (!Object.prototype.hasOwnProperty.call(result, key)) result[key] = []
+    } else if (indent > 0 && trimmed.startsWith("-") && key) {
+      const val = trimmed.slice(1).trim()
+      if (val && !result[key].includes(val)) result[key].push(val)
+    }
+  }
+  return result
 }
 
 function addAliasObject(map, object, game = "") {
@@ -2117,7 +2246,7 @@ function extractGenericSections(sections, item, list, detail) {
   addSection(sections, "故事", firstText([detail.story, detail.background, detail.partner_info?.trust_lv?.["3"]]))
 }
 
-function buildItemView(item, list, detail, images) {
+function buildItemView(item, list, detail, images, materialMeta) {
   const base = {
     kind: viewKind(item),
     game: item.game,
@@ -2130,7 +2259,7 @@ function buildItemView(item, list, detail, images) {
     description: cleanText(item.description),
     meta: verifiedViewMeta(item, list, detail),
     stats: extractStatFacts(item, detail),
-    materials: extractMaterialObjects(item, detail, images),
+    materials: extractMaterialObjects(item, detail, images, materialMeta),
   }
 
   if (base.kind === "challenge") {
@@ -2152,16 +2281,23 @@ function buildItemView(item, list, detail, images) {
     const skills = extractSkillCards(item, detail, images)
     const portraitKey = `gi-${String(item.raw?.meta?.recordId || item.id).split("-")[0]}`
     const portraitFile = item.game === "原神" && PORTRAITS[portraitKey]
+    // 原神：nanoka 的 gi 数据没有立绘字段（character 记录只引用头像 icon），
+    // 但 gallery 里下载了 UI_AvatarIcon_<Name>_Card.webp（由 icon 派生）。
+    // images.first 只在当前记录的图片条目里找（找不到立绘条目），
+    // 所以用 images.localAsset 直接按文件名回退 gallery，让角色卡能显示立绘而非头像。
+    const avatarIcon = detail?.icon || list?.icon || ""
+    const drawCardName = avatarIcon ? `${avatarIcon}_Card` : ""
     return {
       ...base,
       portrait: portraitFile ? pathToFileURL(path.join(resourcesPath, "miao-theme", "portraits", portraitFile)).href
-        : images.first(["derived.avatarDrawCard", "detail.skin", "detail.partner_info.role_icon"]),
+        : images.first(["derived.avatarDrawCard", "detail.skin", "detail.partner_info.role_icon"])
+          || (drawCardName ? images.localAsset([drawCardName]) : ""),
       skills,
       skillColumns: item.game === "原神" ? [skills] : splitCardsBalanced(skills, 2),
       constellations: extractConstellationCards(item, list, detail, images),
       passives: extractPassiveCards(item, detail, images),
       enhancements: extractEnhancementCards(item, detail, images),
-      materialGroups: extractMaterialGroups(item, detail, images),
+      materialGroups: extractMaterialGroups(item, detail, images, materialMeta),
     }
   }
 
@@ -3169,20 +3305,30 @@ function findDeepValue(value, keys = [], depth = 0) {
   return ""
 }
 
-function extractMaterialObjects(item, detail, images) {
+function extractMaterialObjects(item, detail, images, materialMeta) {
   const materials = []
   collectMaterials(detail.materials, materials)
   collectMaterials(detail.ascension?.materials || detail.ascension?.mats || detail.ascension, materials)
   collectMaterials(detail.promote?.materials || detail.promote?.mats, materials)
-  return mergeMaterials(materials, item, images)
+  return mergeMaterials(materials, item, images, materialMeta)
 }
 
-function extractMaterialGroups(item, detail, images) {
+// 供 readAtlasItem 预先解析物品详情（需要在 buildItemView 之前异步取到 week 字段）
+function collectMaterialNames(detail) {
+  const materials = []
+  collectMaterials(detail?.materials, materials)
+  collectMaterials(detail?.ascension?.materials || detail?.ascension?.mats || detail?.ascension, materials)
+  collectMaterials(detail?.promote?.materials || detail?.promote?.mats, materials)
+  return materials.map(material => material?.name).filter(Boolean)
+}
+
+function extractMaterialGroups(item, detail, images, materialMeta) {
   const groups = []
   const labels = { ascensions: "角色突破材料", talents: "天赋升级材料", promote: "晋阶材料", materials: "养成材料" }
   for (const [key, value] of Object.entries(detail.materials || {})) {
     const materials = []; collectMaterials(value, materials)
-    const items = mergeMaterials(materials, item, images)
+    // 周本材料只出现在天赋升级组（世界 boss 材料只出现在突破组），据此补「周本」批注
+    const items = mergeMaterials(materials, item, images, materialMeta, key === "talents" ? "talent" : "")
     if (!items.length) continue
     let cost = 0
     const visit = value => { if (!value || typeof value !== "object") return; cost += Number(value.cost || 0); for (const child of Object.values(value)) if (typeof child === "object") visit(child) }
@@ -3221,7 +3367,7 @@ function collectMaterials(value, target) {
   }
 }
 
-function mergeMaterials(materials, item, images) {
+function mergeMaterials(materials, item, images, materialMeta = new Map(), hint = "") {
   const merged = new Map()
   for (const material of materials) {
     if (!material?.name) continue
@@ -3238,9 +3384,135 @@ function mergeMaterials(materials, item, images) {
   }
   return [...merged.values()].map(material => ({
     name: material.name,
+    id: material.id,
     count: material.count ? String(material.count) : "",
     icon: material.icon,
+    weekday: resolveMaterialWeekday(material, materialMeta, hint),
   }))
+}
+
+// 武器突破秘境材料 → 开放星期（按材料名关键字匹配；周本 boss 材料标「周本」）。
+// 移植自 Atlas/scripts/make_weapon_card.js 的 getMatWeekday，供 Lotus 武器卡「副本材料时间批注」使用。
+// itemAll 为可选增强：nanoka item_all 的 week 字段（0→一四/1→二五/2→三六）或 source_list 周本标记。
+const DOMAIN_WEEKDAY = [
+  { kw: ["高塔孤王", "孤云凌霄"], t: "一四" },
+  { kw: ["哀叙冰玉"], t: "二五" },
+  { kw: ["雾海云间"], t: "二五" },
+  { kw: ["墟散人藏"], t: "二五" },
+  { kw: ["焚尽之环"], t: "日" },
+  { kw: ["今昔剧画"], t: "三六" },
+  { kw: ["鸣神御灵", "浮田栄花"], t: "二五" },
+  { kw: ["甘露"], t: "二五" },
+  { kw: ["邃羽", "秘刻"], t: "一四" },
+  { kw: ["初露"], t: "二五" },
+  { kw: ["雪结"], t: "一四" },
+  { kw: ["幻造"], t: "二五" },
+]
+// 周本（Trounce）掉落材料关键字兜底名单。nanoka 的 item_all 不给周本材料任何标记
+// （week 为空、source_list 为空），只能按名字补；只收录无争议的周本掉落，世界 boss 材料不在此列。
+// 出现在角色「天赋升级材料」组的周本材料由 resolveMaterialWeekday 的 talent 分支自动识别，无需在此列举。
+const BOSS_WEEKLY = [
+  "凛风奔狼", "北风的", "北风之", "东风的", "东风之", "南风的", "孤云的",
+  "血玉之枝", "玄岩之塔", "灭诤草蔓",
+  "魔王之刃", "鎏金之", "符纹之齿",
+  "熔毁之刻", "狱火之蝶", "灰烬之心", "祸神之",
+  "万劫之真意", "傀儡的悬丝", "无心的渊镜", "空行的虚铃",
+  "原初绿洲之初绽", "亘古树海之一瞬", "生长天地之蕨草",
+  "吞天之鲸", "真葛废瘤", "倾覆魔神", "凛雪帝皇",
+  "未能达成超越之水", "无光丝线", "无光涡眼",
+]
+const WEEK_MAP = ["一四", "二五", "三六"]
+// hint="talent" 表示该材料来自角色「天赋升级材料」组：nanoka 数据不给周本材料任何标记
+// （week 为空、source_list 为空），但周本材料只出现在天赋组，世界 boss 材料只出现在突破组，
+// 因此对「角色培养素材」类型的天赋材料补「周本」批注。
+function resolveMaterialWeekday(material, materialMeta, hint) {
+  const meta = materialMeta?.get(material.name)
+  const weekday = getMatWeekday(material.name, material.id, meta)
+  if (weekday) return weekday
+  if (hint === "talent" && meta?.type === "角色培养素材") return "周本"
+  return null
+}
+
+function getMatWeekday(name, id, meta) {
+  if (!name) return null
+  if (BOSS_WEEKLY.some(k => name.includes(k))) return "周本"
+  if (meta && typeof meta === "object") {
+    const source = Array.isArray(meta.source_list) ? meta.source_list.join("") : ""
+    if (/周本|周常|北风狼|若陀|公子|女士|散兵|正机|鲸鱼|龙王/.test(source) || /周本/.test(meta.type || "")) return "周本"
+    if (typeof meta.week === "number" && WEEK_MAP[meta.week]) return WEEK_MAP[meta.week]
+  }
+  for (const d of DOMAIN_WEEKDAY) if (d.kw.some(k => name.includes(k))) return d.t
+  return null
+}
+
+// 物品记录的文件名就是物品名，content.detail 里带权威的 week / type / source_list。
+// 按材料名惰性读取（一张卡通常只涉及十来个材料），结果按 root|locale|game 缓存，避免全量扫 2000+ 个 JSON。
+async function resolveMaterialMetaMap(root, localeFolder, gameFolder, names, fsImpl) {
+  const result = new Map()
+  const unique = [...new Set(names.map(name => String(name || "").trim()).filter(Boolean))]
+  if (!root || !localeFolder || !gameFolder || !unique.length) return result
+
+  const cacheKey = `${root}|${localeFolder}|${gameFolder}`
+  let cache = MATERIAL_META_CACHE.get(cacheKey)
+  if (!cache) {
+    cache = new Map()
+    MATERIAL_META_CACHE.set(cacheKey, cache)
+    if (MATERIAL_META_CACHE.size > 6) MATERIAL_META_CACHE.delete(MATERIAL_META_CACHE.keys().next().value)
+  }
+  const pending = unique.filter(name => !cache.has(name))
+  if (pending.length) {
+    const dirs = await materialDirs(root, localeFolder, gameFolder, fsImpl)
+    for (const name of pending) {
+      let meta = null
+      for (const dir of dirs) {
+        const file = path.join(dir, `${sanitizeAtlasFileName(name)}.json`)
+        if (!await exists(file, fsImpl)) continue
+        try {
+          const detail = JSON.parse(await fsImpl.readFile(file, "utf8"))?.content?.detail
+          if (detail && typeof detail === "object") {
+            meta = {
+              week: typeof detail.week === "number" ? detail.week : null,
+              type: typeof detail.type === "string" ? detail.type : "",
+              source_list: Array.isArray(detail.source_list) ? detail.source_list : [],
+            }
+          }
+        } catch {
+          meta = null
+        }
+        break
+      }
+      cache.set(name, meta)
+    }
+  }
+  for (const name of unique) {
+    const meta = cache.get(name)
+    if (meta) result.set(name, meta)
+  }
+  return result
+}
+
+async function materialDirs(root, localeFolder, gameFolder, fsImpl) {
+  const cacheKey = `${root}|${localeFolder}|${gameFolder}`
+  const cached = MATERIAL_DIR_CACHE.get(cacheKey)
+  if (cached) return cached
+  const base = path.join(root, "data", "items", localeFolder, gameFolder, "物品")
+  const dirs = []
+  if (await exists(base, fsImpl)) {
+    dirs.push(base)
+    try {
+      for (const entry of await fsImpl.readdir(base, { withFileTypes: true })) {
+        if (entry.isDirectory()) dirs.push(path.join(base, entry.name))
+      }
+    } catch {
+      // 目录不可读时只用根目录兜底
+    }
+  }
+  MATERIAL_DIR_CACHE.set(cacheKey, dirs)
+  return dirs
+}
+
+function sanitizeAtlasFileName(name) {
+  return String(name || "").replace(/[\\/:*?"<>|]/g, "_").trim()
 }
 
 function resolveMaterialIcon(material, item, images) {

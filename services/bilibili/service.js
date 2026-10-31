@@ -766,6 +766,9 @@ export function normalizeDownloadConfig(config = {}) {
     video_transcode: source.video_transcode && typeof source.video_transcode === "object"
       ? { ...source.video_transcode }
       : {},
+    video_relay: source.video_relay && typeof source.video_relay === "object"
+      ? { ...source.video_relay }
+      : {},
     max_estimated_size_mb: Number(source.max_estimated_size_mb || 0),
     multi_page_policy: ["zip", "all", "first"].includes(source.multi_page_policy) ? source.multi_page_policy : "zip",
     cache_enable: source.cache_enable !== false,

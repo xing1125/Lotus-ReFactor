@@ -20,6 +20,7 @@ import {
   scheduleTempCleanup,
   transcodeVideoToTarget,
 } from "../services/bilibili/transcode.js"
+import { buildRelayLink, cleanupRelay, normalizeRelayConfig } from "../services/bilibili/relay.js"
 import { ToolInstallerService } from "../services/tools/installer.js"
 
 const searchCache = new Map()
@@ -340,6 +341,11 @@ export class LotusBilibili extends BasePlugin {
       ...(globalConfig.bilibili?.download || {}),
     })
     logger?.mark?.(`[Lotus-Plugin] Bilibili cleanup finished: ${result.removedEntries} cache entries, ${result.removedFiles} files, freed=${result.freedBytes || 0} bytes, trigger=${options.trigger || "schedule"}`)
+    // 中转区过期文件顺带清理（生命周期独立于下载缓存）
+    const relayResult = await cleanupRelay()
+    if (relayResult.removedFiles) {
+      logger?.mark?.(`[Lotus-Plugin] Bilibili relay cleanup removed ${relayResult.removedFiles} files, freed=${relayResult.freedBytes} bytes`)
+    }
     return result
   }
 
@@ -383,23 +389,43 @@ async function imageFileToDataUrl(file) {
   return `data:${mime};base64,${buffer.toString("base64")}`
 }
 
-async function sendBiliFile(e, file, config = {}) {
+export async function sendBiliFile(e, file, config = {}) {
   const stat = await fs.stat(file)
   const sizeMb = stat.size / (1000 * 1000)
   const videoLimitMb = Number(config.video_size_limit_mb || 100)
   const wxLimitMb = normalizeWechatVideoLimitMb(config.video_wx_limit_mb)
 
-  let videoFailure = ""
-  if (isVideoFile(file) && sizeMb <= videoLimitMb && globalThis.segment?.video) {
-    const result = await sendBiliVideoMessage(e, file, config, { sizeMb, wxLimitMb })
-    if (result.ok) return
-    videoFailure = result.reason
-    logger?.warn?.(`[Lotus-Plugin] Bilibili video message skipped: ${result.reason}`)
+  // 视频一律优先走 HTTP 中转：彻底绕开 hook 微信的文件/视频发送通道，
+  // 避免客户端崩溃（2026-10-28 实测 16MB 文件发送后 5 秒 WeChatWin.dll 崩溃）。
+  // 仅在 HTTP 中转不可用时才应急走原通道。
+  if (isVideoFile(file)) {
+    const relayCfg = normalizeRelayConfig(config)
+    if (relayCfg.enable) {
+      const relay = await buildRelayLink(file, path.basename(file), relayCfg)
+      if (relay.ok) {
+        const ttlText = relay.ttlHours >= 1 ? `${relay.ttlHours} 小时` : `${Math.round(relay.ttlHours * 60)} 分钟`
+        await e.reply(
+          `[荷花插件]视频已改为链接中转，${ttlText}内有效（${relay.sizeMb.toFixed(1)}MB）：\n`
+          + `${relay.url}\n`
+          + `手机需与本机同一网络或可路由到本机；链接失效请重新发送解析。`)
+        return
+      }
+      logger?.warn?.(`[Lotus-Plugin] Bilibili relay unavailable: ${relay.reason}`)
+    }
+    // 中转不可用时的应急兜底（仍可能走微信文件通道，仅 HTTP 服务未就绪时触发）
+    if (sizeMb <= videoLimitMb && globalThis.segment?.video) {
+      const result = await sendBiliVideoMessage(e, file, config, { sizeMb, wxLimitMb })
+      if (result.ok) return
+      logger?.warn?.(`[Lotus-Plugin] Bilibili video message skipped: ${result.reason}`)
+    }
+    if (e.isGroup && e.group?.sendFile) return e.group.sendFile(file, path.basename(file))
+    if (e.friend?.sendFile) return e.friend.sendFile(file, path.basename(file))
+    throw new Error("中转不可用且当前适配器不支持发送文件")
   }
 
+  // 非视频文件：直接发送
   if (e.isGroup && e.group?.sendFile) return e.group.sendFile(file, path.basename(file))
   if (e.friend?.sendFile) return e.friend.sendFile(file, path.basename(file))
-  if (videoFailure) throw new Error(videoFailure)
   throw new Error("当前适配器不支持发送文件")
 }
 

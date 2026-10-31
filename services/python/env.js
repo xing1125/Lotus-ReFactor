@@ -218,9 +218,47 @@ const HOST_INJECTED_PY_ENV_KEYS = [
   "CODEBUDDY_NODE_RUN_AS_NODE",
 ]
 
+// 宿主（WorkBuddy / CodeBuddy）启动本插件时会往环境里塞「本次会话专属」的本地代理
+// （HTTP_PROXY/HTTPS_PROXY=http://127.0.0.1:<随机端口>）。会话结束端口就没了，但插件是常驻的，
+// 子进程会一直拿着这个死代理：httpx 默认 trust_env=True，请求全部被路由到 127.0.0.1:死端口，
+// 直接 WinError 10061。线上事故：api.geetest.com 不在宿主 NO_PROXY 白名单里，test_nine 打码
+// 100% 连不上 → 每次签到卡验证码重试 → 180s 被 runner 强杀，全站签到失败。
+// 处理方式不是粗暴删代理（真需要代理才能出网的环境还得用），而是把插件自己依赖的域名
+// 补进 NO_PROXY：这些域名本来就该直连（宿主也已把 .mihoyo.com 划进直连），代理死活与它们无关。
+const DIRECT_HOSTS = [
+  ".mihoyo.com",
+  ".mihoyo.com.cn",
+  ".miyoushe.com",
+  ".hoyolab.com",
+  ".hoyoverse.com",
+  ".yuanshen.com",
+  ".geetest.com",
+  ".kurobbs.com",
+]
+
+function withDirectHosts(noProxy) {
+  const parts = String(noProxy || "")
+    .split(",")
+    .map(item => item.trim())
+    .filter(Boolean)
+  const lower = new Set(parts.map(item => item.toLowerCase()))
+  for (const host of DIRECT_HOSTS) {
+    if (!lower.has(host)) {
+      parts.push(host)
+      lower.add(host)
+    }
+  }
+  return parts.join(",")
+}
+
 export function withUtf8ProcessEnv(env = process.env) {
   const next = { ...env }
   for (const key of HOST_INJECTED_PY_ENV_KEYS) delete next[key]
+  // 大小写两份都写：httpx/urllib 读 HTTPS_PROXY 与 NO_PROXY，requests 读小写，
+  // 只改一份会出现「上游走代理、下游直连」的不一致。
+  const noProxy = withDirectHosts(next.NO_PROXY || next.no_proxy)
+  next.NO_PROXY = noProxy
+  next.no_proxy = noProxy
   return {
     ...next,
     PYTHONUTF8: "1",

@@ -1,12 +1,16 @@
 import { createDefaultProfile } from "../../core/config/profile.js"
 
-export function buildBbsToolsConfig(profile) {
+export function buildBbsToolsConfig(profile, options = {}) {
   const base = createBbsToolsDefaultConfig()
   const account = profile?.account || {}
   const device = profile?.device || {}
   const mihoyobbs = profile?.mihoyobbs || {}
   const games = profile?.games || {}
   const cloudGames = profile?.cloud_games || {}
+  // 全局覆盖（config/global.yaml 的 checkin.bbs）：用于「不改每个用户 profile」就能统一关掉
+  // 某个任务或收窄板块。典型用途见 services/mihoyoBbsTools/config.js 里 like 的注释。
+  const bbsOverride = options.bbs || {}
+  const checkinList = normalizeCheckinList(bbsOverride.checkin_list)
 
   return mergeConfig(base, {
     account: {
@@ -22,13 +26,17 @@ export function buildBbsToolsConfig(profile) {
       fp: device.fp || "",
     },
     mihoyobbs: {
-      enable: Boolean(mihoyobbs.enable),
-      checkin: Boolean(mihoyobbs.tasks?.checkin ?? mihoyobbs.checkin),
-      checkin_list: mihoyobbs.checkin_list || base.mihoyobbs.checkin_list,
-      read: Boolean(mihoyobbs.tasks?.read ?? mihoyobbs.read),
-      like: Boolean(mihoyobbs.tasks?.like ?? mihoyobbs.like),
-      cancel_like: Boolean(mihoyobbs.tasks?.cancel_like ?? mihoyobbs.cancel_like),
-      share: Boolean(mihoyobbs.tasks?.share ?? mihoyobbs.share),
+      enable: pickBoolean(bbsOverride.enable, Boolean(mihoyobbs.enable)),
+      checkin: pickBoolean(bbsOverride.checkin, Boolean(mihoyobbs.tasks?.checkin ?? mihoyobbs.checkin)),
+      checkin_list: checkinList || mihoyobbs.checkin_list || base.mihoyobbs.checkin_list,
+      read: pickBoolean(bbsOverride.read, Boolean(mihoyobbs.tasks?.read ?? mihoyobbs.read)),
+      // 点赞（like / cancel_like）长期被米游社风控挡死：接口固定返回
+      // {"data":null,"message":"invalid request","retcode":-10001}，上游每板块还要做
+      // 30s/15s/6s 的退避重试，实测单次签到里有 100s+ 全耗在这上面（线上 18/18 全失败）。
+      // 米游币在「签到 + 阅读 + 分享」就到 50 上限，点赞失败并不影响收益，所以默认关掉。
+      like: pickBoolean(bbsOverride.like, Boolean(mihoyobbs.tasks?.like ?? mihoyobbs.like)),
+      cancel_like: pickBoolean(bbsOverride.cancel_like, Boolean(mihoyobbs.tasks?.cancel_like ?? mihoyobbs.cancel_like)),
+      share: pickBoolean(bbsOverride.share, Boolean(mihoyobbs.tasks?.share ?? mihoyobbs.share)),
     },
     games: {
       cn: {
@@ -156,6 +164,21 @@ function normalizeGameSwitch(value = {}) {
     checkin: Boolean(value.checkin),
     black_list: Array.isArray(value.black_list) ? value.black_list : [],
   }
+}
+
+// 全局覆盖只认布尔真值：yaml 里留空 / 写 null 一律视为「沿用用户 profile」，
+// 避免运维误把空值当成 false 把任务全关掉。
+function pickBoolean(value, fallback) {
+  return typeof value === "boolean" ? value : fallback
+}
+
+// 板块 id 列表：非空数组才生效，元素转数字并去重，乱七八糟的值直接丢弃。
+function normalizeCheckinList(value) {
+  if (!Array.isArray(value)) return null
+  const ids = [...new Set(value
+    .map(item => Number(item))
+    .filter(item => Number.isInteger(item) && item > 0))]
+  return ids.length ? ids : null
 }
 
 function mergeConfig(base, patch) {

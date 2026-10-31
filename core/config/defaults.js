@@ -227,6 +227,13 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
         preset: "veryfast",
         timeout_ms: 900000,
       },
+      // 大文件 HTTP 中转：超微信上限且压缩不可用时，落盘挂链接而不直发微信文件通道
+      //（hook 微信发大文件有崩客户端风险）。清理随 B 站每日清理任务执行。
+      video_relay: {
+        enable: true,
+        ttl_hours: 10 / 60, // 10 分钟：中转链接超时就失效并清理，避免占用本地存储
+        max_total_size_mb: 2048,
+      },
       max_estimated_size_mb: 0,
       multi_page_policy: "zip",
       cache_enable: true,

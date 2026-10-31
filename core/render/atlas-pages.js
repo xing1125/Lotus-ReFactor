@@ -174,6 +174,10 @@ function groupsOf(data) {
     add('养成材料', blocks)
   } else if (view.kind === 'weapon') {
     const blocks = [textBlock(view.description), ...factsBlocks(view.stats || []), ...cardBlocks(view.refinements || [])]
+    if (view.materials?.length) {
+      blocks.push(labelBlock('突破材料'))
+      blocks.push(...materialBlocks(view.materials))
+    }
     if (view.story) blocks.push(labelBlock('武器故事'), textBlock(view.story))
     add(view.page || '装备图鉴', blocks)
   } else if (view.kind === 'relic') {
@@ -240,8 +244,19 @@ function factsBlocks(items) {
   return blocks
 }
 function materialBlocks(items) {
-  return (items || []).map(item => ({ type: 'material', icon: item.icon, name: linesOf(item.name || item.title || '', INNER - 180, 20), count: String(item.count || ''),
-    height: Math.max(86, linesOf(item.name || item.title || '', INNER - 180, 20).length * 28 + 26) }))
+  return (items || []).map(item => {
+    const nameLines = linesOf(item.name || item.title || '', INNER - 180, 20)
+    const weekday = item.weekday || null
+    // 副本材料时间批注（周本/一四/二五/三六）：预留一行高度绘制红框批注
+    return {
+      type: 'material',
+      icon: item.icon,
+      name: nameLines,
+      count: String(item.count || ''),
+      weekday,
+      height: Math.max(86, nameLines.length * 28 + 26) + (weekday ? 30 : 0),
+    }
+  })
 }
 
 export function buildAtlasPages(data) {
@@ -346,6 +361,15 @@ export async function renderAtlasPage(data, options = {}) {
       if (icon) contain(icon, 40, y + 11, 60, 60)
       textLines(block.name, icon ? 120 : 44, y + 24, 20)
       if (block.count) textLines([`× ${block.count}`], 654, y + 26, 21, GOLD)
+      if (block.weekday) {
+        const label = block.weekday
+        const bw = label.length * 15 + 12
+        const bx = icon ? 120 : 44, by = y + 52
+        ctx.strokeStyle = '#a63b2a'; ctx.lineWidth = 1.5
+        ctx.beginPath(); ctx.roundRect(bx, by, bw, 22, 4); ctx.stroke()
+        // textLines 用 textBaseline='top'，因此 y 传的是文字顶部：22 高的框配 14px 字 → top 偏移 4 居中
+        textLines([label], bx + 6, by + 4, 14, '#a63b2a')
+      }
     } else if (block.type.startsWith('table')) {
       if (block.type === 'table-head') rect(24, y, INNER, block.height, HEAD_TINT, 0)
       let x = 44

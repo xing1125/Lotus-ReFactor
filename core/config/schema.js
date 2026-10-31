@@ -484,6 +484,24 @@ function validateBilibiliConfig(bilibili = {}, errors) {
   if (!Array.isArray(bilibili.download.extra_args) || !bilibili.download.extra_args.every(isString)) {
     errors.push("bilibili.download.extra_args must be an array of strings")
   }
+  // 大文件中转：宽松校验，缺省合法
+  if (typeof bilibili.download.video_relay !== "undefined") {
+    if (!isObject(bilibili.download.video_relay)) {
+      errors.push("bilibili.download.video_relay must be an object")
+    } else {
+      if (typeof bilibili.download.video_relay.enable !== "boolean") {
+        errors.push("bilibili.download.video_relay.enable must be boolean")
+      }
+      if (typeof bilibili.download.video_relay.ttl_hours !== "undefined"
+        && !(typeof bilibili.download.video_relay.ttl_hours === "number" && bilibili.download.video_relay.ttl_hours >= 0)) {
+        errors.push("bilibili.download.video_relay.ttl_hours must be a non-negative number (hours)")
+      }
+      if (typeof bilibili.download.video_relay.max_total_size_mb !== "undefined"
+        && !isNonNegativeInteger(bilibili.download.video_relay.max_total_size_mb)) {
+        errors.push("bilibili.download.video_relay.max_total_size_mb must be a non-negative integer")
+      }
+    }
+  }
 }
 
 function validateDouyinConfig(config = {}, errors) {
