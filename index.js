@@ -36,7 +36,11 @@ await installLotusRuntimeInterception().catch(error => {
   logger?.debug?.(`[${pluginName}] runtime interception skipped: ${error.message}`)
 })
 
-await syncTrackedSubmodules().then(result => {
+// 子模块同步不能 await：它会对三个子模块逐个 fetch 远程（本机直连 GitHub 很慢），
+// 阻塞会让 index 导入超过 Yunzai 的 plugin_load_timeout(60s)，
+// 触发「插件加载超时」后 Lotus 的优先级排序被跳过，全站命令路由错乱。
+// 改为后台执行，完成/失败只打日志（同步逻辑不变，仅去掉 await）。
+void syncTrackedSubmodules().then(result => {
   if (result.action === "submodules_updated") {
     logger?.mark?.("[" + pluginName + "] " + result.message)
   } else if (!result.ok) {
