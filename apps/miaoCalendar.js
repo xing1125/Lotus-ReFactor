@@ -1,6 +1,6 @@
 const BasePlugin = globalThis.plugin
 
-import { resolvePriority } from "../core/intercept/priority.js"
+import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
 import { replyText } from "../core/transport/reply.js"
 import { MiaoWikiBridge } from "../services/pluginBridge/miaoWiki.js"
 
@@ -10,7 +10,7 @@ export class LotusMiaoCalendar extends BasePlugin {
       name: "[Lotus-Plugin] Miao Calendar",
       dsc: "Lotus bridge for miao calendar and material commands",
       event: "message",
-      priority: resolvePriority("miao_calendar"),
+      priority: LOTUS_INTERCEPT_PRIORITY,
       rule: [
         {
           reg: "^(#|喵喵)(日历|日历列表)$",
@@ -65,7 +65,7 @@ export class LotusMiaoCalendar extends BasePlugin {
 
   async replyBridgeError(title, error) {
     logger?.warn?.(`[Lotus-Plugin] miao calendar bridge failed: ${error.stack || error.message}`)
-    await replyText(this, `[荷花插件]${title}需要 miao-plugin 可加载：${error.message}`)
+    await replyText(this, `[荷花插件]${title}处理失败：${error.message}`)
   }
 }
 

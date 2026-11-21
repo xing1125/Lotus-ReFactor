@@ -1,14 +1,13 @@
 const BasePlugin = globalThis.plugin
-import { accountDisplay } from "../services/checkin/account.js"
 
-import { resolvePriority } from "../core/intercept/priority.js"
+import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
 import {
   isMissingProfileError,
   loadProfile,
   normalizeProfileId,
   profileLoginRequiredMessage,
 } from "../core/config/profile.js"
-import { AccountService } from "../core/login/account.js"
+import { refreshAccountAndSync, isAccountChangedError } from "../core/login/refresh.js"
 import { renderStatusCard, renderTemplate } from "../core/render/service.js"
 import { replyImage, replyText } from "../core/transport/reply.js"
 import { splitProfileSuffix } from "../services/pluginBridge/common.js"
@@ -20,7 +19,7 @@ export class LotusGenshinTeamDamage extends BasePlugin {
       name: "[Lotus-Plugin] Genshin Team Damage",
       dsc: "Profile aware Genshin team damage calculator",
       event: "message",
-      priority: resolvePriority("genshin_team_damage"),
+      priority: LOTUS_INTERCEPT_PRIORITY,
       rule: [
         { reg: "^#队伍伤害(?:详情|过程|全图)?[\\s\\S]*$", fnc: "teamDamage" },
       ],
@@ -29,7 +28,11 @@ export class LotusGenshinTeamDamage extends BasePlugin {
   }
 
   async teamDamage() {
-    const parsed = splitTeamDamageProfile(this.e.msg)
+    let parsed
+    try { parsed = splitTeamDamageProfile(this.e.msg) } catch {
+      await replyText(this, "[荷花插件]profile 编号需为 1–255，请检查队伍伤害指令中的编号。")
+      return true
+    }
     const profileId = parsed.hasProfileSuffix ? parsed.profileId : 1
     const command = parsed.message
     const userId = String(this.e.user_id)
@@ -53,7 +56,7 @@ export class LotusGenshinTeamDamage extends BasePlugin {
       logger?.error?.(`[Lotus-Plugin] genshin team damage failed: ${error.stack || error.message}`)
       const image = await renderStatusCard({
         title: "原神队伍伤害",
-        subtitle: `${accountDisplay(String(userId))} · Profile ${profileId}`,
+        subtitle: `QQ ${userId} · Profile ${profileId}`,
         badge: "失败",
         message: error.message,
         userId,
@@ -71,29 +74,26 @@ export class LotusGenshinTeamDamage extends BasePlugin {
 }
 
 export function splitTeamDamageProfile(message = "") {
-  const suffix = splitProfileSuffix(message)
-  if (suffix.hasProfileSuffix) return suffix
-
   const text = String(message || "").trim()
-  const match = text.match(/^(#队伍伤害(?:详情|过程|全图)?)([1-9]\d{0,2})(?=\D)([\s\S]*)$/)
-  if (!match) return suffix
-  try {
-    const profileId = normalizeProfileId(match[2])
-    return {
-      hasProfileSuffix: true,
-      profileId,
-      message: `${match[1]}${match[3]}`.trim(),
-    }
-  } catch {
-    return suffix
+  const match = text.match(/^(#队伍伤害(?:详情|过程|全图)?)(\d+)(?=\D|$)([\s\S]*)$/)
+  const suffix = () => /(?:lv|等级)\s*\d+$/i.test(text)
+    ? { hasProfileSuffix: false, message: text, profileId: 1 }
+    : splitProfileSuffix(text)
+  if (!match) return suffix()
+  const profileId = normalizeProfileId(match[2])
+  return {
+    hasProfileSuffix: true,
+    profileId,
+    message: `${match[1]}${match[3]}`.trim(),
   }
 }
 
 async function refreshProfileBeforeQuery(userId, profileId, profile) {
   if (!profile?.account?.stoken) return profile
   try {
-    return await new AccountService().refresh(userId, profileId)
+    return await refreshAccountAndSync(userId, profileId, { expectedProfile: profile })
   } catch (error) {
+    if (isAccountChangedError(error)) throw error
     logger?.debug?.(`[Lotus-Plugin] team damage pre-refresh skipped: ${error.message}`)
     return profile
   }

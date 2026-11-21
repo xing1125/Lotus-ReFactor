@@ -1,7 +1,8 @@
 import fs from "node:fs/promises"
 import path from "node:path"
+import { createHash } from "node:crypto"
 import YAML from "yaml"
-import { resolveConfig } from "../path.js"
+import { resolveConfig, resolveData } from "../path.js"
 import {
   CURRENT_GLOBAL_CONFIG_VERSION,
   createDefaultGlobalConfig,
@@ -38,6 +39,7 @@ export async function ensureGlobalConfig(options = {}) {
   try {
     const raw = await fs.readFile(file, "utf8")
     const parsed = YAML.parse(raw) || {}
+    await preserveLegacyBilibiliCredentials(parsed)
     const config = assertValidGlobalConfig(migrateGlobalConfig(parsed))
     const normalized = YAML.stringify(config)
     if (raw !== normalized) {
@@ -63,6 +65,7 @@ export async function ensureGlobalConfig(options = {}) {
 export async function saveGlobalConfig(config, options = {}) {
   const { fileName = GLOBAL_CONFIG_FILE } = options
   const file = globalConfigFilePath(fileName)
+  await preserveLegacyBilibiliCredentials(config)
   const migrated = assertValidGlobalConfig(migrateGlobalConfig(config))
 
   await fs.mkdir(path.dirname(file), { recursive: true })
@@ -77,14 +80,35 @@ export function migrateGlobalConfig(config = {}) {
 
   const base = createDefaultGlobalConfig()
   const normalizedConfig = normalizeLegacyGlobalShape(config)
+  delete normalizedConfig.python
+  delete normalizedConfig.render
+  delete normalizedConfig.logging
+  delete normalizedConfig.logRetentionDays
+  if (normalizedConfig.permissions?.scopes) delete normalizedConfig.permissions.scopes["permissions.manage"]
+  if (normalizedConfig.bilibili) {
+    for (const key of ["cookie", "sessdata", "sessData"]) delete normalizedConfig.bilibili[key]
+    if (normalizedConfig.bilibili.download) for (const key of ["cookie", "sessdata"]) delete normalizedConfig.bilibili.download[key]
+  }
+  if (normalizedConfig.music) delete normalizedConfig.music.voice_one_second
+  if (normalizedConfig.tools?.ffmpeg) delete normalizedConfig.tools.ffmpeg.enable
+  if (normalizedConfig.captcha?.gtmanual) delete normalizedConfig.captcha.gtmanual.address
+  if (normalizedConfig.tools) { delete normalizedConfig.tools.auto_install; delete normalizedConfig.tools.bbdown; delete normalizedConfig.tools.aria2 }
+  if (normalizedConfig.bilibili?.download) {
+    for (const key of ["use_aria2", "extra_args", "aria2_args", "aria2_proxy"]) delete normalizedConfig.bilibili.download[key]
+  }
+  if (normalizedConfig.tuneweave) delete normalizedConfig.tuneweave.auto_update
+  if (normalizedConfig.captcha?.test_nine) {
+    delete normalizedConfig.captcha.test_nine.auto_start
+    delete normalizedConfig.captcha.test_nine.download_models
+    delete normalizedConfig.captcha.test_nine.venv_path
+    delete normalizedConfig.captcha.test_nine.submodule_path
+    delete normalizedConfig.captcha.test_nine.install_requirements
+  }
   const legacyPermissions = findLegacyPermissionControl(normalizedConfig)
   const hasExplicitPermissions = Object.prototype.hasOwnProperty.call(normalizedConfig, "permissions")
   const patch = {
     ...normalizedConfig,
     version: CURRENT_GLOBAL_CONFIG_VERSION,
-  }
-  if (patch.tools?.bbdown?.repo === "nilaoda/BBDown") {
-    patch.tools = { ...patch.tools, bbdown: { ...patch.tools.bbdown, repo: "MOPELotus/BBDown" } }
   }
   if (legacyPermissions) {
     patch.permissions = hasExplicitPermissions
@@ -95,6 +119,20 @@ export function migrateGlobalConfig(config = {}) {
   return assertValidGlobalConfig(mergeConfig(base, {
     ...patch,
   }))
+}
+
+// Preserve retired credentials privately before rewriting an old configuration.
+// They cannot be imported into TuneWeave automatically; QR login owns new sessions.
+async function preserveLegacyBilibiliCredentials(config) {
+  const source = config?.bilibili || {}, credentials = {}
+  for (const key of ["cookie", "sessdata", "sessData"]) if (typeof source[key] === "string" && source[key].trim()) credentials[key] = source[key]
+  for (const key of ["cookie", "sessdata"]) if (typeof source.download?.[key] === "string" && source.download[key].trim()) credentials[`download_${key}`] = source.download[key]
+  if (!Object.keys(credentials).length) return
+  const content = YAML.stringify(credentials), id = createHash("sha256").update(content).digest("hex").slice(0, 16)
+  const directory = resolveData("bilibili", "legacy")
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 })
+  try { await fs.writeFile(path.join(directory, `config-${id}.yaml`), content, { flag: "wx", mode: 0o600 }) }
+  catch (error) { if (error.code !== "EEXIST") throw error }
 }
 
 export function normalizeLegacyGlobalShape(config = {}) {
@@ -180,7 +218,7 @@ function normalizeLegacyBilibili(input = {}, externalTools = {}) {
   if (typeof input.sessData !== "undefined" && typeof next.sessdata === "undefined") {
     next.sessdata = input.sessData
   }
-  if (typeof input.useAria2 !== "undefined") download.use_aria2 = Boolean(input.useAria2)
+  delete next.useAria2
   if (typeof input.resolution !== "undefined") download.resolution = Number(input.resolution)
   if (typeof input.durationLimit !== "undefined") download.duration_limit_seconds = Number(input.durationLimit)
   if (typeof input.videoSizeLimit !== "undefined") download.video_size_limit_mb = Number(input.videoSizeLimit)
@@ -215,6 +253,9 @@ function normalizeCronFields(config = {}) {
   if (config.scheduler) {
     config.scheduler.plan_generate_cron = normalizeQuartzCron(config.scheduler.plan_generate_cron)
     config.scheduler.run_due_cron = normalizeQuartzCron(config.scheduler.run_due_cron)
+    const catchUp = config.scheduler.catch_up_cron
+    if (catchUp == null || (typeof catchUp === "string" && !catchUp.trim())) delete config.scheduler.catch_up_cron
+    else config.scheduler.catch_up_cron = normalizeQuartzCron(catchUp)
   }
   if (config.netease_partner) {
     delete config.netease_partner.api_url

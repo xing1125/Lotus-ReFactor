@@ -4,7 +4,7 @@ import { ensureGlobalConfig } from "./core/config/global.js"
 import { isModuleEnabled, moduleLabel, MODULE_BY_APP_FILE } from "./core/config/modules.js"
 import { replyText } from "./core/transport/reply.js"
 import { autoStartTestNineServer } from "./services/testNine/server.js"
-import { checkTrackedSubmoduleRemoteUpdates, syncTrackedSubmodules } from "./services/pluginUpdate/service.js"
+import { checkTrackedSubmoduleRemoteUpdates, syncSubmodulesIsolated } from "./services/pluginUpdate/service.js"
 import { scheduleBBDownStartupUpdate } from "./services/tools/startup.js"
 
 const pluginName = "Lotus-Plugin"
@@ -40,11 +40,16 @@ await installLotusRuntimeInterception().catch(error => {
 // 阻塞会让 index 导入超过 Yunzai 的 plugin_load_timeout(60s)，
 // 触发「插件加载超时」后 Lotus 的优先级排序被跳过，全站命令路由错乱。
 // 改为后台执行，完成/失败只打日志（同步逻辑不变，仅去掉 await）。
-void syncTrackedSubmodules().then(result => {
-  if (result.action === "submodules_updated") {
+// 隔离同步：逐个 submodule 单独 update，某个子仓库损坏不再拖累 nanoka-atlas-backend，
+// 也不会再出现一句笼统的「子模块提交不匹配，但自动更新失败」。
+void syncSubmodulesIsolated().then(result => {
+  if (result.synced?.length) {
     logger?.mark?.("[" + pluginName + "] " + result.message)
+  }
+  if (result.failed?.length) {
+    logger?.warn?.("[" + pluginName + "] 子模块同步部分失败：" + result.failed.join(", ") + "（图鉴后端已独立处理，不影响使用）")
   } else if (!result.ok) {
-    logger?.warn?.("[" + pluginName + "] submodule sync skipped: " + result.message)
+    logger?.warn?.("[" + pluginName + "] submodule status failed: " + result.message)
   }
 }).catch(error => {
   logger?.debug?.("[" + pluginName + "] submodule sync skipped: " + error.message)
@@ -158,7 +163,9 @@ function silenceEntries(entries) {
   for (const entry of Array.isArray(entries) ? entries : [entries]) {
     if (entry && typeof entry === "object") {
       // 在改写 log 前记录原始显式性：gate 靠它区分「被动监听型 rule」（原始 log:false）
-      entry.__lotusExplicitRule = entry.log !== false
+      // 图鉴插件的 rule 数组是所有实例共享的，会被多个实例重复 silence；
+      // 必须保留首次计算值，否则第二次会把全部条目误判成「被动监听型」（log 已被改成 false）。
+      entry.__lotusExplicitRule = entry.__lotusExplicitRule ?? (entry.log !== false)
       entry.log = false
     }
   }

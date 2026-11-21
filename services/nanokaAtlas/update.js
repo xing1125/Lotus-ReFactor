@@ -126,6 +126,32 @@ export class AtlasUpdateService {
 
   async reset(config = {}) {
     const root = resolveAtlasDataRoot(config.data_root)
+    const backend = resolveBackendRoot(config.backend_root)
+
+    // 安全守卫：本机 global.yaml 把 data_root 直接指到了后端仓库根目录，
+    // 此时 rm(root) 会连子模块代码 / package.json / src 一起删掉。
+    // 检测到 data_root 就是后端仓库（或其内含 scrape.mjs）时，只清数据产物。
+    const isBackendRoot = path.resolve(root) === path.resolve(backend)
+      || await exists(path.join(root, "src", "scrape.mjs"), this.fs)
+    if (isBackendRoot) {
+      const removed = []
+      for (const sub of ["data", "gallery"]) {
+        const target = path.join(root, sub)
+        if (await exists(target, this.fs)) {
+          await this.fs.rm(target, { recursive: true, force: true })
+          removed.push(sub)
+        }
+      }
+      return {
+        ok: true,
+        mode: "reset",
+        root,
+        guarded: true,
+        removed,
+        message: `检测到 data_root 指向后端仓库，已保护代码目录，仅清理 ${removed.join(" / ") || "（无）"}。`,
+      }
+    }
+
     await this.fs.rm(root, { recursive: true, force: true })
     return {
       ok: true,
@@ -187,6 +213,24 @@ export async function syncBackendOutput({
   const root = resolveBackendRoot(backendRoot)
   const targetRoot = resolveAtlasDataRoot(dataRoot)
   const copied = []
+  const skipped = []
+
+  // 本机 global.yaml 把 atlas.data_root 直接指向后端仓库根目录。
+  // 此时 source 与 target 是同一个目录：copyDir 会先把 ~230MB 数据复制到 staging，
+  // 再把原目录 rename 走、staging rename 回来，纯属白费 I/O，且中途 data/ 会短暂消失。
+  // 抓取本来就直接写在这个目录里，直接跳过即可。
+  if (path.resolve(root) === path.resolve(targetRoot)) {
+    skipped.push("data")
+    if (syncGallery) skipped.push("gallery")
+    return {
+      ok: true,
+      targetRoot,
+      copied,
+      skipped,
+      sameRoot: true,
+      message: "data_root 与后端仓库同目录，抓取结果已直接写入，跳过同步复制。",
+    }
+  }
 
   await copyDir(path.join(root, "data"), path.join(targetRoot, "data"), fsImpl)
   copied.push("data")
@@ -200,6 +244,8 @@ export async function syncBackendOutput({
     ok: true,
     targetRoot,
     copied,
+    skipped,
+    sameRoot: false,
   }
 }
 

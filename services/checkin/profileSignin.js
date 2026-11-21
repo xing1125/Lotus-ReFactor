@@ -134,6 +134,7 @@ export async function renderSigninResult({ result, profile, skipped, forcedDisab
   // 把卡拉得过长（用户反馈「太长了下面的就不用显示了」）；失败卡仍保留排查建议。
   // 先抽立绘，再同时用作背景与（微信无头像时的）头像回退
   const illustration = getRandomCharacter()
+  const display = await resolveCardDisplay()
 
   return renderTemplate("checkin-result", {
     title: resolveDisplayName(profile),
@@ -145,7 +146,7 @@ export async function renderSigninResult({ result, profile, skipped, forcedDisab
     // 微信等拿不到真实头像时，复用同一张立绘作为头像，与背景保持协调
     avatar: accountAvatar(profile.user?.qq, profile.user?.platform, illustration),
     userId: profile.user?.qq,
-    games: buildSigninRows(profile, result,  skipped, forcedDisables),
+    games: filterSigninRows(buildSigninRows(profile, result, skipped, forcedDisables), profile, display),
   }, {
     saveId: `lotus-checkin-${profile.user?.qq || "user"}-${profile.profile?.id || 1}`,
   })
@@ -159,6 +160,7 @@ export async function renderSigninMulti({ userId, entries }) {
   const illustration = getRandomCharacter()
   const title = firstProfile ? resolveDisplayName(firstProfile) : accountDisplay(userId)
   const allOk = entries.length > 0 && entries.every(entry => entry.outcome?.ok)
+  const display = await resolveCardDisplay()
   return renderTemplate("checkin-result", {
     title,
     subtitle: `${entries.length} 个账号`,
@@ -167,7 +169,7 @@ export async function renderSigninMulti({ userId, entries }) {
     avatar: accountAvatar(userId, firstProfile?.user?.platform, illustration),
     userId,
     sections: entries.map(entry => {
-      const games = entry.outcome?.games || []
+      const games = filterSigninRows(entry.outcome?.games || [], entry.outcome?.profile, display)
       return {
         label: `账号 ${entry.profileId}${entry.outcome?.profile ? ` · ${resolveDisplayName(entry.outcome.profile)}` : ""}`,
         badge: entry.outcome ? (entry.outcome.ok ? "成功" : "失败") : "未执行",
@@ -186,6 +188,7 @@ export async function renderSigninFailure({ stage, profile, error, message, advi
   const failureMessage = `${message} ${error?.message || ""} ${advice || ""}`.trim()
   // 先抽立绘，再同时用作背景与（微信无头像时的）头像回退
   const illustration = getRandomCharacter()
+  const display = await resolveCardDisplay()
   return renderTemplate("checkin-result", {
     title: resolveDisplayName(profile),
     subtitle: `profile ${profileId}`,
@@ -198,7 +201,11 @@ export async function renderSigninFailure({ stage, profile, error, message, advi
     // 微信等拿不到真实头像时，复用同一张立绘作为头像，与背景保持协调
     avatar: accountAvatar(userId, profile?.user?.platform, illustration),
     userId,
-    games: buildSigninRows(profile || {}, { ok: false }, collectSkipped(profile || {}, forcedDisables), forcedDisables),
+    games: filterSigninRows(
+      buildSigninRows(profile || {}, { ok: false }, collectSkipped(profile || {}, forcedDisables), forcedDisables),
+      profile || {},
+      display,
+    ),
   }, {
     saveId: `lotus-checkin-error-${userId || "user"}-${profileId}`,
   })
@@ -234,37 +241,97 @@ const SIGNIN_GAMES = [
   { key: "starry", label: "星布谷地", forumId: 10, communityOnly: true },
 ]
 
-function buildSigninRows(profile, result, skipped = [], forcedDisables = {}) {
+export function buildSigninRows(profile, result, skipped = [], forcedDisables = {}) {
   const games = profile.games?.cn || {}
   const bbs = profile.mihoyobbs || {}
   const fd = forcedDisables || {}
   const communityEnabled = fd.mihoyobbs !== true && Boolean(bbs.enable && (bbs.tasks?.checkin ?? bbs.checkin ?? true))
-  const daysMap = extractGameSigninDays(result?.message)
+  // 解析 runner 回传 message 里的「连续签到天数」与「今日奖励」，按游戏 key 归位到每一行
+  const details = parseSigninDetails(result?.message)
   const rows = SIGNIN_GAMES.map(game => {
     const gameKey = game.key === "honkai_sr" ? "honkai_sr" : game.key
     const gameForcedOff = fd[gameKey] === true
     const gameEnabled = !game.communityOnly && games.enable !== false && games[game.key]?.checkin === true && !gameForcedOff
     const forumEnabled = communityEnabled && bbs.checkin_list?.map?.(Number).includes(game.forumId)
-    const rawDays = daysMap[game.key]
-    const days = rawDays !== undefined && rawDays !== null ? `${rawDays}天` : "-"
+    const det = details[gameKey] || {}
+    const days = det.days !== undefined && det.days !== null ? `${det.days}天` : "-"
+    const reward = det.reward || "-"
     return {
+      key: game.key,
       label: game.label,
       game: game.communityOnly ? "无" : gameEnabled ? (result.ok ? "成功" : "失败") : "关闭",
       community: forumEnabled ? (result.ok ? "成功" : "失败") : "关闭",
       days,
+      reward,
     }
   })
   // 社区（米游社）汇总行：供主人看板「社区」列展示；communityEnabled 已考虑全局 forced_disables.mihoyobbs。
+  // 社区奖励（米游币）单独从 mihoyobbs 段抽取，不与游戏奖励混淆。
+  const commDet = details.mihoyobbs || {}
   rows.push({
+    key: "community",
     label: "社区",
     game: "无",
     community: communityEnabled ? (result.ok ? "成功" : "失败") : "关闭",
     days: "-",
+    reward: commDet.reward || "-",
   })
   return rows
 }
 
-const GAME_SIGNIN_NAME_ALIASES = [
+// 账号实际「在玩」哪些游戏：米游社角色同步只覆盖 gs / sr / zzz，
+// 其余游戏靠「本次签到真的跑到了」来判断（见 filterSigninRows）。
+const ROLE_KEYS = { genshin: "gs", honkai_sr: "sr", zzz: "zzz" }
+
+// 签到卡显示开关（锅巴「签到卡片」分组）。读不到配置时退回默认：自动精简 + 全部游戏可显示。
+export async function resolveCardDisplay() {
+  const config = await loadGlobalConfig().catch(() => null)
+  return config?.checkin?.display || {}
+}
+
+// 出卡前按「在玩几个显示几个」裁剪行。
+// 注意：只在渲染层裁剪，outcome.games 仍是全量行，主人看板 / 审计 / 统计不受影响。
+export function filterSigninRows(rows, profile, display = {}) {
+  const list = Array.isArray(rows) ? rows : []
+  if (!list.length) return list
+  const games = display.games || {}
+  // 自动精简关掉时，每游戏开关依然生效（关掉 = 该行永不出现）
+  const switchOn = key => games[key] !== false
+  const autoHide = display.auto_hide !== false
+  const roles = profile?.account?.game_roles || {}
+  const currentUid = profile?.account?.current_uid || {}
+  const kept = list.filter(row => {
+    if (row.key === "community") {
+      if (display.community === false) return false
+      // 社区行没有「角色」概念：没开社区签到就不占位
+      return autoHide ? row.community !== "关闭" : true
+    }
+    if (!switchOn(row.key)) return false
+    if (!autoHide) return true
+    // 本次真的签到了这个游戏（有连续天数或奖励）
+    if (row.days !== "-" || row.reward !== "-") return true
+    const roleKey = ROLE_KEYS[row.key]
+    if (!roleKey) return false
+    const bound = Array.isArray(roles[roleKey]) ? roles[roleKey].length > 0 : Boolean(roles[roleKey])
+    return bound || Boolean(currentUid[roleKey])
+  })
+  // 兜底：账号还没同步过角色、本次也没跑出任何游戏结果时，退回「列出已开启的游戏」，
+  // 避免卡片只剩一张空白表。
+  if (!kept.length) return list.filter(row => row.key === "community" ? display.community !== false : switchOn(row.key))
+  return kept
+}
+
+export function extractGameSigninDays(message) {
+  const details = parseSigninDetails(message)
+  const map = {}
+  for (const [key, v] of Object.entries(details)) if (v.days !== undefined) map[key] = v.days
+  return map
+}
+
+// runner 在 message 里用「官方游戏名」做段头（如「崩坏：星穹铁道」，而面板 label 是「星铁」），
+// 二者并不一致，所以不能拿 SIGNIN_GAMES.label 当段头去切。这里单独维护一套
+// 「runner 真实段头名 → 内部 key」别名表，覆盖版本间差异，确保每段都能正确归位。
+const GAME_MESSAGE_ALIASES = [
   { key: "genshin", names: ["原神"] },
   { key: "honkai2", names: ["崩坏学园2", "崩坏2"] },
   { key: "honkai3rd", names: ["崩坏3rd", "崩坏3"] },
@@ -273,22 +340,49 @@ const GAME_SIGNIN_NAME_ALIASES = [
   { key: "zzz", names: ["绝区零"] },
 ]
 
-export function extractGameSigninDays(message) {
-  const map = {}
-  if (!message) return map
+// 解析 MihoyoBBSTools runner 回传的 message，按游戏段抽取：
+export function parseSigninDetails(message) {
+ //  - days：连续签到天数（「{名}已连续签到N天」）
+ //  - reward：今日奖励（游戏：今天获得的奖励是「物品」xN；社区米游社：今天已经获得 N 个米游币）
+ // message 真实格式（来自 data/audit/checkin.jsonl）：
+ //   原神: \n白山茶已连续签到27天\n今天获得的奖励是「冒险家的经验」x3\n\n崩坏：星穹铁道: \n...\n\n绝区零: \n...
+ //   米游社: \n今天已经获得 50 个米游币
+ // 段以「{游戏名}:」为界切分，避免跨游戏误匹配；匹配不到的字段回落到 "-"/undefined。
+  const out = {}
+  if (!message) return out
   const text = String(message)
-  for (const { key, names } of GAME_SIGNIN_NAME_ALIASES) {
-    for (const name of names) {
-      const idx = text.indexOf(name)
-      if (idx === -1) continue
-      // 从游戏名出现位置向后搜索约 120 个字符内的“已连续签到 N 天”
-      const slice = text.slice(idx, idx + 160)
-      const match = slice.match(/已连续签到\s*(\d+)\s*天/)
-      if (match) {
-        map[key] = Number(match[1])
-        break
-      }
+  const headers = [
+    ...GAME_MESSAGE_ALIASES,
+    { key: "mihoyobbs", names: ["米游社"] },
+  ]
+  const positions = []
+  for (const h of headers) {
+    for (const name of h.names) {
+      const re = new RegExp(`(?:^|\\n)${escapeRegExp(name)}\\s*:`, "g")
+      let m
+      while ((m = re.exec(text)) !== null) positions.push({ key: h.key, idx: m.index + m[0].length })
     }
   }
-  return map
+  positions.sort((a, b) => a.idx - b.idx)
+  for (let i = 0; i < positions.length; i++) {
+    const start = positions[i].idx
+    const end = i + 1 < positions.length ? positions[i + 1].idx : text.length
+    const sec = text.slice(start, end)
+    const d = sec.match(/已连续签到\s*(\d+)\s*天/)
+    let reward = "-"
+    // 游戏奖励：今天获得的奖励是「物品」xN（也兼容半角框与 今天获得的奖励是：Nx 「物品」 的社区格式）
+    const gr = sec.match(/今天获得的奖励是[：: ]*\s*[「\[]?\s*(.+?)\s*[」\]]?\s*[x×]\s*(\d+)/)
+    if (gr) reward = `${gr[1]} ×${gr[2]}`
+    else {
+      // 社区米游币：今天已经获得 N 个米游币 / 今天已经全部完成了！一共获得 N 个米游币
+      const cr = sec.match(/(?:今天已经获得|一共获得)\s*(\d+)\s*个米游币/)
+      if (cr) reward = `${cr[1]} 米游币`
+    }
+    out[positions[i].key] = { days: d ? Number(d[1]) : undefined, reward }
+  }
+  return out
+}
+
+function escapeRegExp(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }

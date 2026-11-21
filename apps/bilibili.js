@@ -2,7 +2,7 @@ const BasePlugin = globalThis.plugin
 
 import fs from "node:fs/promises"
 import path from "node:path"
-import { resolvePriority } from "../core/intercept/priority.js"
+import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
 import { loadGlobalConfig } from "../core/config/global.js"
 import { PermissionService } from "../core/permissions/service.js"
 import { renderStatusCard, renderTemplate } from "../core/render/service.js"
@@ -10,17 +10,11 @@ import { replyImage, replyText } from "../core/transport/reply.js"
 import {
   BilibiliService,
   formatNumber,
-  normalizeCleanupConfig,
   normalizeDownloadConfig,
+  resolveCommandPath,
 } from "../services/bilibili/service.js"
-import {
-  isVideoFile,
-  normalizeTranscodeConfig,
-  normalizeWechatVideoLimitMb,
-  scheduleTempCleanup,
-  transcodeVideoToTarget,
-} from "../services/bilibili/transcode.js"
-import { buildRelayLink, cleanupRelay, normalizeRelayConfig } from "../services/bilibili/relay.js"
+import { buildMediaMessageText } from "../services/media/message.js"
+import { sendMediaFile, mediaFailureMessage } from "../services/media/files.js"
 import { ToolInstallerService } from "../services/tools/installer.js"
 
 const searchCache = new Map()
@@ -31,36 +25,22 @@ export class LotusBilibili extends BasePlugin {
       name: "[Lotus-Plugin] Bilibili",
       dsc: "Lotus Bilibili parser",
       event: "message",
-      priority: resolvePriority("bilibili"),
+      priority: LOTUS_INTERCEPT_PRIORITY,
       rule: [
-        { reg: "^#荷花搜视频.+", fnc: "searchVideo" },
+        { reg: "^#(荷花)?搜视频.+", fnc: "searchVideo" },
         { reg: "^#看[0-9]+$", fnc: "pickVideo" },
-        { reg: "^#荷花看视频.+", fnc: "directWatch" },
+        { reg: "^#(荷花)?看视频.+", fnc: "directWatch" },
         { reg: "^#(B站|b站|荷花)(下载|下视频)\\s+[\\s\\S]+$", fnc: "downloadVideo" },
         { reg: "^#B站登录$", fnc: "login" },
-        { reg: "^#BBDown登录$", fnc: "bbdownLogin" },
         { reg: "(bilibili.com|b23.tv|bili2233.cn|live.bilibili.com|^[Bb][Vv][1-9A-Za-z]{10}$|^[Aa][Vv][0-9]+$)", fnc: "parse" },
       ],
     })
-    this.task = [
-      {
-        name: "荷花插件B站下载清理",
-        cron: "0 10 4 * * ? *",
-        fnc: this.cleanupDownloads.bind(this),
-        log: false,
-      },
-    ]
   }
 
   async init() {
-    const globalConfig = await loadGlobalConfig()
-    if (!normalizeCleanupConfig(globalConfig.bilibili).startup) return
-    const timer = setTimeout(() => {
-      this.cleanupDownloads({ trigger: "startup" }).catch(error => {
-        logger?.warn?.(`[Lotus-Plugin] Bilibili cleanup failed: ${error.message}`)
-      })
-    }, 60 * 1000)
-    if (typeof timer.unref === "function") timer.unref()
+    await (await createService()).recoverTasks().catch(error => {
+      globalThis.logger?.warn?.(`[Lotus-Plugin] Bilibili task recovery: ${error.message}`)
+    })
   }
 
   async parse() {
@@ -71,7 +51,7 @@ export class LotusBilibili extends BasePlugin {
   }
 
   async searchVideo() {
-    const keyword = String(this.e.msg || "").replace(/^#荷花搜视频/, "").trim()
+    const keyword = String(this.e.msg || "").replace(/^#(?:荷花)?搜视频/, "").trim()
     if (!keyword) {
       await replyText(this, "[荷花插件]请输入搜索关键词。")
       return true
@@ -116,7 +96,7 @@ export class LotusBilibili extends BasePlugin {
   }
 
   async directWatch() {
-    const keyword = String(this.e.msg || "").replace(/^#荷花看视频/, "").trim()
+    const keyword = String(this.e.msg || "").replace(/^#(?:荷花)?看视频/, "").trim()
     if (!keyword) {
       await replyText(this, "[荷花插件]请输入关键词。")
       return true
@@ -148,7 +128,7 @@ export class LotusBilibili extends BasePlugin {
         title: "B站登录",
         subtitle: "荷花插件 Bilibili",
         badge: "3 MIN",
-        notice: "使用 Bilibili App 扫码确认。登录 cookie 会保存在 data/bilibili/account.yaml，不写入仓库。",
+        notice: "使用 Bilibili App 扫码确认。登录由 TuneWeave 保存，Lotus 仅保存账号引用。",
         qrDataUrl: qr.qrDataUrl,
         profileId: "bilibili",
       }, {
@@ -162,7 +142,7 @@ export class LotusBilibili extends BasePlugin {
         title: "B站登录",
         subtitle: "荷花插件 Bilibili",
         badge: "完成",
-        message: "B站账号 cookie 已保存，后续搜索和解析会自动使用。",
+        message: "B站账号引用已保存，后续搜索和解析会自动使用。",
         userId: this.e.user_id,
         items: [
           { label: "来源", value: result.account.source },
@@ -174,57 +154,6 @@ export class LotusBilibili extends BasePlugin {
       await replyImage(this, report, "[荷花插件]B站登录完成。")
     } catch (error) {
       await this.renderError("B站登录", error)
-    }
-    return true
-  }
-
-  async bbdownLogin() {
-    const globalConfig = await loadGlobalConfig()
-    const permission = new PermissionService({ permissions: globalConfig.permissions })
-      .explain(this.e, "bilibili.login")
-    if (!permission.ok) {
-      await this.renderError("BBDown登录", new Error("只有 bot 主人可以维护 BBDown 登录态。"))
-      return true
-    }
-
-    const service = await createService()
-    try {
-      const result = await service.runBBDownLogin(globalConfig.bilibili?.download || {}, {
-        onEvent: async event => {
-          if (event.qrPath) {
-            const qrDataUrl = await imageFileToDataUrl(event.qrPath)
-            const image = await renderTemplate("qr-login", {
-              title: "BBDown 登录",
-              subtitle: "荷花插件 Bilibili",
-              badge: "扫码",
-              notice: "使用 Bilibili App 扫码确认。该登录态供 BBDown 下载会员/高画质内容使用。",
-              qrDataUrl,
-              profileId: "bbdown",
-            }, {
-              saveId: `lotus-bbdown-login-${this.e.user_id || "master"}`,
-            })
-            await replyImage(this, image, "[荷花插件]BBDown 登录二维码已生成。")
-          } else if (event.message) {
-            await replyText(this, `[荷花插件]${event.message}`)
-          }
-        },
-      })
-      const image = await renderStatusCard({
-        title: "BBDown 登录",
-        subtitle: "荷花插件 Bilibili",
-        badge: result.ok ? "完成" : "结束",
-        message: result.ok ? "BBDown 登录流程已完成。" : "BBDown 登录进程已结束，请查看日志判断是否成功。",
-        userId: this.e.user_id,
-        items: [
-          { label: "退出码", value: String(result.code ?? "-") },
-          { label: "日志", value: result.logPath || "无" },
-        ],
-      }, {
-        saveId: `lotus-bbdown-login-result-${this.e.user_id || "master"}`,
-      })
-      await replyImage(this, image, "[荷花插件]BBDown 登录流程结束。")
-    } catch (error) {
-      await this.renderError("BBDown登录", error)
     }
     return true
   }
@@ -291,7 +220,10 @@ export class LotusBilibili extends BasePlugin {
     try {
       const installPermission = new PermissionService({ permissions: globalConfig.permissions })
         .explain(this.e, "tools.install")
-      if (globalConfig.tools?.auto_install !== false && installPermission.ok) {
+      const existingTools = await Promise.all(["ffmpeg", "ffprobe"].map(name => resolveCommandPath(name, downloadConfig.tools_path)))
+      // A video request must not wait for GitHub update checks when the
+      // installed tools are present. Startup maintenance checks their integrity.
+      if (installPermission.ok && existingTools.some(file => !file)) {
         const tools = await new ToolInstallerService({ config: globalConfig.tools }).ensureAll()
         if (!tools.ok) {
           throw new Error(`工具链初始化失败：${tools.items?.filter(item => !item.ok).map(item => `${item.name}:${item.reason}`).join(" / ") || "unknown"}`)
@@ -309,55 +241,35 @@ export class LotusBilibili extends BasePlugin {
         if (result.reason === "live_download_unsupported" && result.info) {
           return this.renderInfo(result.info, { download: false })
         }
-        await this.renderError(options.title || "B站下载", new Error(downloadFailureMessage(result)))
+        await this.renderError(options.title || "B站下载", new Error(mediaFailureMessage(result)))
         return true
       }
 
       for (const file of result.files || []) {
-        await sendBiliFile(this.e, file, downloadConfig)
+        await sendMediaFile(this.e, file, { ...downloadConfig, file_name: result.fileNames?.[file] })
       }
     } catch (error) {
       await this.renderError(options.title || "B站下载", error)
     } finally {
-      const cleanupConfig = normalizeCleanupConfig(globalConfig.bilibili)
-      if (cleanupConfig.enable && cleanupConfig.delete_after_send && result?.files?.length) {
-        const released = await service.releaseDownloadedFiles(result.files).catch(error => {
-          logger?.warn?.(`[Lotus-Plugin] Bilibili post-send cleanup failed: ${error.message}`)
-          return null
+      if (result?.taskDir) {
+        await service.releaseTask(result).catch(error => {
+          globalThis.logger?.warn?.(`[Lotus-Plugin] Bilibili task cleanup failed: ${error.message}`)
         })
-        if (released?.removedFiles) {
-          logger?.mark?.(`[Lotus-Plugin] Bilibili post-send cleanup removed ${released.removedFiles} files, freed ${released.freedBytes} bytes`)
-        }
       }
     }
     return true
   }
 
-  async cleanupDownloads(options = {}) {
-    const globalConfig = await loadGlobalConfig()
-    const service = await createService()
-    const result = await service.cleanupDownloads({
-      ...(globalConfig.bilibili || {}),
-      ...(globalConfig.bilibili?.download || {}),
-    })
-    logger?.mark?.(`[Lotus-Plugin] Bilibili cleanup finished: ${result.removedEntries} cache entries, ${result.removedFiles} files, freed=${result.freedBytes || 0} bytes, trigger=${options.trigger || "schedule"}`)
-    // 中转区过期文件顺带清理（生命周期独立于下载缓存）
-    const relayResult = await cleanupRelay()
-    if (relayResult.removedFiles) {
-      logger?.mark?.(`[Lotus-Plugin] Bilibili relay cleanup removed ${relayResult.removedFiles} files, freed=${relayResult.freedBytes} bytes`)
-    }
-    return result
-  }
-
   async renderError(title, error) {
+    const diskFull = error.code === "ENOSPC" || error.code === "EDQUOT" || /No space left on device|Disk quota exceeded/i.test(error.message)
     const image = await renderStatusCard({
       title,
       subtitle: "荷花插件 Bilibili",
       badge: "失败",
-      message: error.message,
+      message: diskFull ? "服务器磁盘空间不足，暂时无法下载或合并视频。" : error.message,
       userId: this.e.user_id,
       items: [
-        { label: "建议", value: "检查链接是否有效，或稍后重试。" },
+        { label: "建议", value: diskFull ? "请联系机器人主人清理磁盘空间后重试。" : "检查链接是否有效，或稍后重试。" },
       ],
     }, {
       saveId: `lotus-bili-error-${this.e.user_id || "user"}`,
@@ -369,17 +281,14 @@ export class LotusBilibili extends BasePlugin {
 async function createService() {
   const config = await loadGlobalConfig()
   const service = new BilibiliService({
-    cookie: config.bilibili?.cookie || config.bilibili?.sessdata || "",
+    tuneweaveConfig: config.tuneweave,
+    searchLimit: config.bilibili?.search_limit,
   })
-  if (!service.cookie) {
-    const stored = await service.loadAccount().catch(() => null)
-    if (stored?.cookie) service.cookie = stored.cookie
-  }
   return service
 }
 
 function cacheKey(e) {
-  return e?.isGroup ? `group:${e.group_id}` : `user:${e.user_id}`
+  return `${e.self_id || ""}:${e.group_id || "private"}:${e.user_id}`
 }
 
 async function imageFileToDataUrl(file) {
@@ -389,116 +298,4 @@ async function imageFileToDataUrl(file) {
   return `data:${mime};base64,${buffer.toString("base64")}`
 }
 
-export async function sendBiliFile(e, file, config = {}) {
-  const stat = await fs.stat(file)
-  const sizeMb = stat.size / (1000 * 1000)
-  const videoLimitMb = Number(config.video_size_limit_mb || 100)
-  const wxLimitMb = normalizeWechatVideoLimitMb(config.video_wx_limit_mb)
-
-  // 视频发送策略（按大小分流）：
-  //   - 小于 video_relay.min_size_mb（缺省 = 微信视频上限 video_wx_limit_mb）→ 走原通道
-  //     直发视频消息（超限先压缩），彻底不碰中转；
-  //   - 达到阈值才优先进 HTTP 中转（绕开 hook 微信文件/视频通道的 WeChatWin.dll 崩溃，
-  //     2026-10-28 实测 16MB 文件发送后 5 秒崩溃），中转不可用再回退原通道。
-  if (isVideoFile(file)) {
-    const relayCfg = normalizeRelayConfig(config)
-    const relayMinMb = relayCfg.min_size_mb === null ? wxLimitMb : relayCfg.min_size_mb
-    if (relayCfg.enable && sizeMb >= relayMinMb) {
-      const relay = await buildRelayLink(file, path.basename(file), relayCfg)
-      if (relay.ok) {
-        const ttlText = relay.ttlHours >= 1 ? `${relay.ttlHours} 小时` : `${Math.round(relay.ttlHours * 60)} 分钟`
-        await e.reply(
-          `[荷花插件]视频已改为链接中转，${ttlText}内有效（${relay.sizeMb.toFixed(1)}MB）：\n`
-          + `${relay.url}\n`
-          + `手机需与本机同一网络或可路由到本机；链接失效请重新发送解析。`)
-        return
-      }
-      logger?.warn?.(`[Lotus-Plugin] Bilibili relay unavailable: ${relay.reason}`)
-    }
-    // 直发兜底：小视频（低于中转阈值）本就走这里；大视频在中转不可用时也回退到这里
-    if (sizeMb <= videoLimitMb && globalThis.segment?.video) {
-      const result = await sendBiliVideoMessage(e, file, config, { sizeMb, wxLimitMb })
-      if (result.ok) return
-      logger?.warn?.(`[Lotus-Plugin] Bilibili video message skipped: ${result.reason}`)
-    }
-    if (e.isGroup && e.group?.sendFile) return e.group.sendFile(file, path.basename(file))
-    if (e.friend?.sendFile) return e.friend.sendFile(file, path.basename(file))
-    throw new Error("中转不可用且当前适配器不支持发送文件")
-  }
-
-  // 非视频文件：直接发送
-  if (e.isGroup && e.group?.sendFile) return e.group.sendFile(file, path.basename(file))
-  if (e.friend?.sendFile) return e.friend.sendFile(file, path.basename(file))
-  throw new Error("当前适配器不支持发送文件")
-}
-
-async function sendBiliVideoMessage(e, file, config, { sizeMb, wxLimitMb }) {
-  const segment = globalThis.segment
-  let playable = file
-  let tempFile = ""
-
-  if (sizeMb > wxLimitMb) {
-    const transcode = normalizeTranscodeConfig(config.video_transcode)
-    if (!transcode.enable) {
-      return {
-        ok: false,
-        reason: `视频 ${sizeMb.toFixed(1)}MB 超过微信 ${wxLimitMb}MB 上限，且未启用发送前压缩，改为文件发送。`,
-      }
-    }
-
-    if (transcode.notify) {
-      await e.reply(`[荷花插件]视频 ${sizeMb.toFixed(1)}MB 超过微信 ${wxLimitMb}MB 上限，正在压缩到 ${transcode.target_mb}MB 以内再发送，请稍候。`)
-        .catch(() => null)
-    }
-
-    const result = await transcodeVideoToTarget({
-      input: file,
-      config: transcode,
-      toolsPath: config.tools_path,
-      onEvent: event => {
-        if (event.message) logger?.debug?.(`[Lotus-Plugin] Bilibili transcode: ${event.message}`)
-      },
-    })
-    if (!result.ok) {
-      return { ok: false, reason: `视频压缩未成功（${result.reason}），改为文件发送。` }
-    }
-
-    playable = result.file
-    tempFile = result.file
-    logger?.mark?.(`[Lotus-Plugin] Bilibili video transcoded to ${result.sizeMb}MB (${result.videoKbps}kbps, ${result.attempts} attempt[s])`)
-  }
-
-  try {
-    await e.reply(segment.video(playable))
-    // 适配器可能仍在后台读取本地文件，延迟清理，避免刚发出就被删。
-    if (tempFile) scheduleTempCleanup(tempFile)
-    return { ok: true }
-  } catch (error) {
-    if (tempFile) scheduleTempCleanup(tempFile, 60000)
-    return { ok: false, reason: `视频消息发送失败：${error.message}` }
-  }
-}
-
-function downloadFailureMessage(result = {}) {
-  if (result.reason === "duration_limit") {
-    return `视频时长超过 ${Math.round(result.limitSeconds / 60)} 分钟限制。`
-  }
-  if (result.reason === "estimated_size_limit") {
-    return `视频预估大小 ${result.estimatedSizeMb} MB 超过 ${result.limitMb} MB 限制。`
-  }
-  return result.reason || "下载失败"
-}
-
-export function buildBilibiliMessageText(e = {}) {
-  const chunks = [
-    e.raw_message,
-    e.msg,
-  ]
-  for (const item of e.message || []) {
-    if ((item?.type === "json" || item?.type === "xml") && item.data) {
-      chunks.push(typeof item.data === "string" ? item.data : JSON.stringify(item.data))
-    }
-    if (item?.type === "text" && item.text) chunks.push(item.text)
-  }
-  return chunks.filter(Boolean).join("\n")
-}
+export const buildBilibiliMessageText = buildMediaMessageText

@@ -1,21 +1,24 @@
+import fs from "node:fs"
+import fsp from "node:fs/promises"
+import path from "node:path"
 import {
   ensureGlobalConfig,
   loadGlobalConfig,
   saveGlobalConfig,
 } from "./core/config/global.js"
 import { DEFAULT_GLOBAL_CONFIG } from "./core/config/defaults.js"
-import { FEATURE_MODULES } from "./core/config/modules.js"
+import { rootPath } from "./core/path.js"
 
 const ARRAY_FIELDS = new Set([
-  "render.background",
   "captcha.providers",
+  "checkin.captcha.providers",
   "captcha.test_nine.model_files",
   "remote.allowed_paths",
   "remote.shells",
-  "bilibili.download.extra_args",
   "netease_partner.comments",
   "atlas.initial_args",
   "atlas.update_args",
+  "atlas.challenge_args",
   "atlas.version_args",
   "permissions.users.allow",
   "permissions.users.deny",
@@ -24,12 +27,19 @@ const ARRAY_FIELDS = new Set([
 ])
 
 const NUMBER_FIELDS = new Set([
-  "render.background_timeout_ms",
+  "coin_shop.port",
+  "coin_shop.ticket_minutes", "coin_shop.panel_ticket_minutes",
+  "coin_shop.session_hours", "coin_shop.panel_session_hours",
+  "music.search_limit", "music.session_timeout_ms", "music.download_timeout_ms", "music.max_size_mb",
+  "bilibili.download.concurrency",
   "captcha.refresh.max_attempts",
   "captcha.retry.provider_attempts",
   "captcha.retry.chain_attempts",
+  "checkin.captcha.provider_attempts",
+  "checkin.captcha.chain_attempts",
   "captcha.notify.recall_seconds",
   "captcha.test_nine.timeout_ms",
+  "captcha.ttocr.itemid_v4",
   "captcha.ttocr.poll_interval_ms",
   "captcha.ttocr.timeout_ms",
   "captcha.gtmanual.timeout_ms",
@@ -50,21 +60,16 @@ const NUMBER_FIELDS = new Set([
   "bilibili.download.resolution",
   "bilibili.download.duration_limit_seconds",
   "bilibili.download.video_size_limit_mb",
-  "bilibili.download.video_wx_limit_mb",
-  "bilibili.download.video_transcode.target_mb",
-  "bilibili.download.video_transcode.max_height",
-  "bilibili.download.video_transcode.audio_kbps",
-  "bilibili.download.video_transcode.min_video_kbps",
-  "bilibili.download.video_transcode.max_duration_seconds",
-  "bilibili.download.video_transcode.timeout_ms",
   "bilibili.download.max_estimated_size_mb",
   "bilibili.download.timeout_ms",
   "tuneweave.request_timeout_ms",
+  "tuneweave.update_delay_ms",
   "netease_partner.login_timeout_ms",
   "netease_partner.login_poll_ms",
   "netease_partner.delay_ms_min",
   "netease_partner.delay_ms_max",
-  "logging.retention_days",
+  "netease_partner.review.max_chars",
+  "netease_partner.review.timeout_ms",
   "atlas.max_results",
   "atlas.update_timeout_ms",
   "atlas.update_output_limit",
@@ -73,8 +78,10 @@ const NUMBER_FIELDS = new Set([
 const CRON_FIELDS = new Set([
   "scheduler.plan_generate_cron",
   "scheduler.run_due_cron",
+  "scheduler.catch_up_cron",
   "netease_partner.schedule",
   "atlas.auto_update.check_cron",
+  "atlas.auto_update.challenge_cron",
 ])
 
 const POLICY_OPTIONS = [
@@ -86,12 +93,11 @@ const POLICY_OPTIONS = [
 
 const SCOPE_LABELS = {
   "checkin.register": "注册签到",
-  "checkin.refresh": "刷新签到",
+  "checkin.refresh": "手动刷新登录",
   "checkin.group_register": "注册本群签到",
   "scheduler.generate": "生成签到计划",
   "scheduler.run_due": "执行到期签到",
   "scheduler.manage": "修改调度配置",
-  "permissions.manage": "修改权限",
   "remote.spawn": "远程命令",
   "remote.upload": "远程上传",
   "remote.download": "远程下载",
@@ -107,29 +113,83 @@ const SCOPE_LABELS = {
   "netease.partner": "网易云任务",
 }
 
-const GUOBA_SCHEMAS = [
-  // 功能开关：由 core/config/modules.js 注册表生成（modules.<id>，缺省开）。
-  ...FEATURE_MODULES.map(module => sw(`modules.${module.id}`, module.label, module.desc)),
-  group("渲染"),  textArea("render.background", "随机背景接口", "每行一个接口、本地路径或图片目录 JSON；会随机选择并自动兜底。"),
-  select("render.theme", "配色主题", [
-    { label: "清透冰雾 · Crystal Mist（推荐）", value: "crystal" },
-    { label: "云雾奶油 · Mist Glass", value: "mist" },
-    { label: "扁平现代 SaaS", value: "saas" },
-    { label: "冰蓝毛玻璃 · Ice", value: "ice" },
-    { label: "赛博极光 · Aurora", value: "aurora" },
-    { label: "晨曦微光 · Dawn", value: "dawn" },
-    { label: "明亮通透 · Light", value: "light" },
-    { label: "提亮玻璃 · Glass", value: "glass" },
-    { label: "上游深色 · Miao Dark", value: "dark" },
-    { label: "深境螺旋 · Abyss（深蓝金）", value: "abyss" },
-  ], "全插件所有卡片共用一套配色（看板 / 帮助菜单 / 状态卡 / 图鉴页 / 星铁挑战页 …）。改后需重载插件生效。"),
-  input("render.theme_color", "主题色（历史字段）", "旧版单色强调色配置，当前配色由「配色主题」控制，此字段暂不生效。"),
-  number("render.background_timeout_ms", "背景加载超时", "单位毫秒。"),
+// 卡片配色：真源是 core/render/theme.js 的 PALETTES（11 套），但持久化只能走
+// Yunzai 根目录 .env 的 LOTUS_THEME —— config/global.yaml 的 render 段会被
+// migrateGlobalConfig 主动删掉（写了也会被配置写入重写丢掉，已踩过）。
+const THEME_OPTIONS = [
+  { label: "crystal 浅青蓝（默认）", value: "crystal" },
+  { label: "mist 雾紫白（浅）", value: "mist" },
+  { label: "saas 商务蓝（浅）", value: "saas" },
+  { label: "ice 冰蓝（浅）", value: "ice" },
+  { label: "dawn 晨曦紫蓝", value: "dawn" },
+  { label: "light 纯白浅色", value: "light" },
+  { label: "glass 玻璃拟态", value: "glass" },
+  { label: "dark 经典深色（原神金）", value: "dark" },
+  { label: "abyss 深渊暗夜", value: "abyss" },
+  { label: "aurora 极光（深紫）", value: "aurora" },
+  { label: "tide 深海冰蓝（旧 fork 方案）", value: "tide" },
+]
+const ENV_THEME_FILE = path.resolve(rootPath, "../../.env")
+const THEME_ENV_LINE = /^\s*LOTUS_THEME\s*=/
 
+function readEnvTheme() {
+  if (process.env.LOTUS_THEME) return String(process.env.LOTUS_THEME).trim().toLowerCase()
+  try {
+    const line = fs.readFileSync(ENV_THEME_FILE, "utf8")
+      .split(/\r?\n/)
+      .find(item => THEME_ENV_LINE.test(item))
+    if (!line) return ""
+    return line.split("=").slice(1).join("=").trim().replace(/^['"]|['"]$/g, "").toLowerCase()
+  } catch {
+    return ""
+  }
+}
+
+async function writeEnvTheme(theme) {
+  const name = String(theme || "").trim().toLowerCase()
+  if (!THEME_OPTIONS.some(option => option.value === name)) throw new Error(`未知配色：${theme}`)
+  let raw = ""
+  try {
+    raw = await fsp.readFile(ENV_THEME_FILE, "utf8")
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error
+  }
+  const lines = raw ? raw.split(/\r?\n/) : []
+  let replaced = false
+  const next = lines.map(line => {
+    if (!THEME_ENV_LINE.test(line)) return line
+    replaced = true
+    return `LOTUS_THEME=${name}`
+  })
+  if (!replaced) {
+    if (next.length && next[next.length - 1] === "") next.pop()
+    next.push("", "# ── 荷花插件卡片配色（锅巴「卡片配色」写入）──", `LOTUS_THEME=${name}`, "")
+  }
+  await fsp.writeFile(ENV_THEME_FILE, next.join("\n"), "utf8")
+}
+
+const GUOBA_SCHEMAS = [
+  group("网页登录"),
+  input("coin_shop.public_url", "公网访问地址", "填用户网页的完整地址，如 https://example.com/lotus/coin-shop/；管理面板使用同一地址的相邻路径。留空自动选择，重启后生效。"),
+  select("coin_shop.mode", "网页服务模式", [
+    { label: "自动选择", value: "auto" },
+    { label: "共用 TRSS 端口", value: "shared" },
+    { label: "独立端口", value: "standalone" },
+  ], "默认优先共用 TRSS 端口。修改后需重启；端口或路由配置错误时可从配置文件恢复。"),
+  input("coin_shop.host", "独立服务监听地址", "仅独立服务使用，默认 127.0.0.1；这是本机监听地址，不是发给用户的公网地址。重启后生效。"),
+  number("coin_shop.port", "独立服务监听端口", "仅独立服务使用，范围 1～65535，默认 18164。重启后生效。"),
+  input("coin_shop.path", "用户网页挂载路径", "默认 /lotus/coin-shop，管理面板挂在同级 /panel。修改后需重启，并同步修改反向代理规则。"),
+  sw("coin_shop.enable", "启用米游社用户网页", "关闭后不再签发用户登录链接，管理面板仍可用。重启后生效。"),
+  input("coin_shop.icp_number", "网页 ICP 备案号", "显示在米游社网页页脚；留空不显示。重启后生效。"),
+  number("coin_shop.ticket_minutes", "用户登录链接有效期", "单位分钟，正整数，默认 10；用于米游社功能页的一次性登录链接，新链接立即采用新设置。"),
+  number("coin_shop.panel_ticket_minutes", "管理链接有效期", "单位分钟，正整数，默认 10；仅影响主人管理面板的一次性登录链接，不改变登录后的会话时长。"),
+  number("coin_shop.session_hours", "用户浏览器令牌有效期", "单位小时，正数，可填小数，默认 8；登录后由当前浏览器保存，机器人重启后仍可继续使用，退出后撤销。新登录采用新设置。"),
+  number("coin_shop.panel_session_hours", "管理浏览器令牌有效期", "单位小时，正数，可填小数，默认 24；独立于一次性链接有效期，机器人重启后保留；每次访问仍核对主人资格，退出后撤销。新登录采用新设置。"),
   group("签到调度"),
   sw("scheduler.enable", "启用自动调度", "关闭后只允许手动签到。"),
   cron("scheduler.plan_generate_cron", "生成计划时间", "每天按此 cron 生成次日签到表。"),
   cron("scheduler.run_due_cron", "到期扫描频率", "扫描到期任务并执行签到。"),
+  cron("scheduler.catch_up_cron", "计划补偿检查频率", "检查缺失的签到计划，留空恢复默认每 10 分钟；不影响签到失败后的重试。重启后生效。"),
   select("scheduler.mode", "全局签到模式", [
     { label: "固定时间", value: "fixed" },
     { label: "随机时间", value: "random" },
@@ -142,74 +202,79 @@ const GUOBA_SCHEMAS = [
   input("scheduler.late_registration.window_start", "补注册窗口开始", "格式 HH:mm。"),
   input("scheduler.late_registration.window_end", "补注册窗口结束", "格式 HH:mm。"),
   sw("scheduler.late_registration.notify", "通知补注册时间", "补注册后通知用户当天时间。"),
+  sw("scheduler.notify_enabled", "计划与补位通知", "关闭后不推「明日自动签到时间」和补位通知，主人 #执行签到 的逐人结果也转为静默；普通 #签到 指令不受影响。"),
+  sw("scheduler.notify_image", "自动签到结果发图", "关闭后自动签到的每人结果只发文字、不渲染卡片；主人汇总看板始终出图。"),
+  sw("scheduler.forced_disables.genshin", "强制关闭 原神签到", "无视个人设置，全局跳过原神签到（等同 #全局关闭原神签到）。"),
+  sw("scheduler.forced_disables.honkai_sr", "强制关闭 星铁签到", "无视个人设置，全局跳过星铁签到（等同 #全局关闭星铁签到）。"),
+  sw("scheduler.forced_disables.zzz", "强制关闭 绝区零签到", "无视个人设置，全局跳过绝区零签到（等同 #全局关闭绝区零签到）。"),
+  sw("scheduler.forced_disables.mihoyobbs", "强制关闭 社区签到", "无视个人设置，全局跳过米游社社区签到（等同 #全局关闭社区签到）。"),
+
+  group("签到卡片"),
+  sw("checkin.display.auto_hide", "只显示在玩的游戏", "开启后签到卡只列出该账号有角色、或本次真的签到到的游戏，不再把 9 个游戏全部铺一遍；关掉则恢复全量列表。"),
+  sw("checkin.display.community", "显示社区（米游社）行", "关闭后签到卡不再出现米游社社区那一行。"),
+  sw("checkin.display.games.genshin", "显示 原神", "关闭后原神一行永不出现；主人看板与签到统计不受影响。"),
+  sw("checkin.display.games.honkai2", "显示 崩坏2", "关闭后崩坏2一行永不出现；主人看板与签到统计不受影响。"),
+  sw("checkin.display.games.honkai3rd", "显示 崩坏3", "关闭后崩坏3一行永不出现；主人看板与签到统计不受影响。"),
+  sw("checkin.display.games.tears_of_themis", "显示 未定事件簿", "关闭后未定事件簿一行永不出现；主人看板与签到统计不受影响。"),
+  sw("checkin.display.games.villa", "显示 大别野", "关闭后大别野一行永不出现；仅影响社区签到展示。"),
+  sw("checkin.display.games.honkai_sr", "显示 星铁", "关闭后星铁一行永不出现；主人看板与签到统计不受影响。"),
+  sw("checkin.display.games.zzz", "显示 绝区零", "关闭后绝区零一行永不出现；主人看板与签到统计不受影响。"),
+  sw("checkin.display.games.hna", "显示 因缘精灵", "关闭后因缘精灵一行永不出现；仅影响社区签到展示。"),
+  sw("checkin.display.games.starry", "显示 星布谷地", "关闭后星布谷地一行永不出现；仅影响社区签到展示。"),
+
+  group("卡片配色"),
+  select("render.theme", "卡片配色方案", THEME_OPTIONS, "写入 Yunzai 根目录 .env 的 LOTUS_THEME，重启后生效（global.yaml 的 render 段会被配置迁移删除，不能存这里）。"),
 
   group("验证码链"),
-  textArea("captcha.providers", "尝试顺序", "每行一个：test_nine、ttocr、gtmanual、vision_ai。"),
+  textArea("captcha.providers", "尝试顺序", "按顺序每行填写一个方案：test_nine＝本地识别，ttocr＝在线识别，gtmanual＝人工验证，vision_ai＝视觉 AI。"),
   sw("captcha.refresh.enable_on_challenge_used", "刷新失效 challenge", "遇到 challenge 已使用时重新请求。"),
-  number("captcha.refresh.max_attempts", "最大刷新次数", "避免无限重试。"),
+  number("captcha.refresh.max_attempts", "挑战刷新预算", "实际预算至少覆盖当前重试配置，重试始终重新申请挑战。"),
   number("captcha.retry.provider_attempts", "单方案尝试次数", "每个自动过码方案最多尝试几次。"),
   number("captcha.retry.chain_attempts", "链路重试轮数", "整条验证码链最多重跑几轮。"),
   sw("captcha.notify.auto_recall", "撤回过码提示", "开启后自动撤回过码提示消息。"),
   number("captcha.notify.recall_seconds", "撤回延迟", "单位秒，0 表示不撤回。"),
-  sw("captcha.test_nine.enable", "启用 test_nine", "本地模型过码。"),
-  sw("captcha.test_nine.auto_start", "启动 test_nine 服务", "插件加载后自动启动本地服务。"),
-  input("captcha.test_nine.endpoint", "test_nine 接口", "默认本机 pass_uni。"),
-  number("captcha.test_nine.timeout_ms", "test_nine 超时", "单位毫秒。"),
-  input("captcha.test_nine.submodule_path", "test_nine 目录", "子模块目录。"),
-  input("captcha.test_nine.venv_path", "test_nine venv", "独立虚拟环境目录。"),
+  sw("captcha.test_nine.enable", "启用本地验证码识别", "使用 JS / ONNX 本地模型；关闭后跳过此方案，不影响环境自动维护。"),
+  input("captcha.test_nine.endpoint", "本地识别接口", "默认本机 pass_uni。"),
+  number("captcha.test_nine.timeout_ms", "本地识别超时", "单位毫秒。"),
   input("captcha.test_nine.model_dir", "模型目录", "模型文件保存目录。"),
   input("captcha.test_nine.model_repo", "模型仓库", "HuggingFace 仓库名。"),
   textArea("captcha.test_nine.model_files", "模型文件", "每行一个模型文件名。"),
-  sw("captcha.test_nine.install_requirements", "安装 test_nine 依赖", "初始化时安装依赖。"),
-  sw("captcha.test_nine.download_models", "下载 test_nine 模型", "初始化时下载模型。"),
   sw("captcha.ttocr.enable", "启用 ttocr", "在线打码平台。"),
   input("captcha.ttocr.api", "ttocr 提交接口", "recognize 接口。"),
   input("captcha.ttocr.resapi", "ttocr 结果接口", "results 接口。"),
   password("captcha.ttocr.key", "ttocr 密钥", "平台密钥。"),
-  input("captcha.ttocr.query", "ttocr 附加参数", "例如 itemid 和 referer。"),
+  input("captcha.ttocr.query", "ttocr v3 附加参数", "v3 使用的 itemid 和 referer。"),
+  number("captcha.ttocr.itemid_v4", "ttocr v4 项目编号", "v4 独立使用的项目编号，默认 488。"),
   number("captcha.ttocr.poll_interval_ms", "ttocr 轮询间隔", "不能低于 1000 毫秒。"),
   number("captcha.ttocr.timeout_ms", "ttocr 超时", "单位毫秒。"),
   sw("captcha.gtmanual.enable", "启用 GT-Manual", "人工过码兜底。"),
-  input("captcha.gtmanual.address", "GT-Manual 地址", "服务根地址。"),
-  input("captcha.gtmanual.verify_addr", "GT-Manual 链接", "用户点击的验证链接。"),
+  sw("captcha.gtmanual.internal_enable", "内置人工验证服务", "默认开启，由荷花维护并共用网页端口；关闭后使用下方外部服务。"),
+  input("captcha.gtmanual.verify_addr", "外部 GT-Manual 注册接口", "关闭内置服务后使用；用户验证链接由外部服务返回。"),
   number("captcha.gtmanual.timeout_ms", "GT-Manual 超时", "单位毫秒。"),
   number("captcha.gtmanual.poll_interval_ms", "GT-Manual 轮询间隔", "单位毫秒。"),
   sw("captcha.vision_ai.enable", "启用视觉 AI", "自定义视觉模型接口。"),
   input("captcha.vision_ai.api", "视觉 AI 接口", "自定义接口地址。"),
   password("captcha.vision_ai.key", "视觉 AI 密钥", "接口鉴权密钥。"),
   number("captcha.vision_ai.timeout_ms", "视觉 AI 超时", "单位毫秒。"),
-
-  group("Python"),
-  select("python.mode", "Python 模式", [
-    { label: "虚拟环境", value: "venv" },
-    { label: "系统 Python", value: "system" },
-  ], "默认使用虚拟环境。"),
-  input("python.venv_path", "主 venv 目录", "Lotus Python 环境目录。"),
-  input("python.system_python", "系统 Python 路径", "system 模式下使用。"),
+  textArea("checkin.captcha.providers", "签到允许的自动方案", "签到桥无法刷新 challenge，只在这些免人工方案间切换，每行一个：test_nine / ttocr / vision_ai。gtmanual 需要人工点链接，群里静默签到看不到，默认不列入。"),
+  number("checkin.captcha.provider_attempts", "签到单方案重试次数", "同一个 challenge 上最多打几次，默认 2（一次原方案 + 一次重试/换方案）。"),
+  number("checkin.captcha.chain_attempts", "签到链路重跑轮数", "默认 1。调大只会反复打同一个 challenge，建议保持 1，交给 Python 侧换新 challenge。"),
 
   group("工具链"),
-  sw("tools.auto_install", "自动准备工具", "初始化时自动下载工具链。"),
   input("tools.dir", "工具目录", "工具保存目录。"),
   input("tools.bin_dir", "可执行文件目录", "命令所在目录。"),
   input("tools.github_api", "GitHub API", "Release 查询接口。"),
-  number("tools.timeout_ms", "工具下载超时", "单位毫秒。"),
+  number("tools.timeout_ms", "工具安装超时", "下载和解压各阶段的超时，单位毫秒。"),
   number("tools.download_retries", "工具下载重试", "安装包损坏或解压失败时自动重下次数。"),
-  sw("tools.bbdown.enable", "启用 BBDown", "B 站视频下载工具。"),
-  input("tools.bbdown.repo", "BBDown 仓库", "GitHub owner/repo。"),
-  input("tools.bbdown.command", "BBDown 命令", "可执行文件名。"),
-  sw("tools.ffmpeg.enable", "启用 ffmpeg", "视频处理工具。"),
   input("tools.ffmpeg.repo", "ffmpeg 仓库", "GitHub owner/repo。"),
   input("tools.ffmpeg.command", "ffmpeg 命令", "可执行文件名。"),
-  sw("tools.aria2.enable", "启用 aria2", "下载加速工具。"),
-  input("tools.aria2.repo", "aria2 仓库", "GitHub owner/repo。"),
-  input("tools.aria2.command", "aria2 命令", "可执行文件名。"),
 
   group("远程管理"),
   sw("remote.enable", "启用远程管理", "远程命令、上传、下载总开关。"),
   sw("remote.require_otp", "要求一次性验证码", "远程操作必须输入 2FA。"),
   input("remote.otp_secret_env", "OTP 环境变量", "从该环境变量读取 OTP secret。"),
   number("remote.timeout_ms", "命令超时", "单位毫秒。"),
-  number("remote.output_limit", "输出长度限制", "超过后截断。"),
+  number("remote.output_limit", "输出长度限制", "单位字符，超过后截断。"),
   number("remote.max_download_bytes", "下载大小限制", "单位字节。"),
   number("remote.max_upload_bytes", "上传大小限制", "单位字节。"),
   sw("remote.allow_overwrite_upload", "允许覆盖上传", "上传时允许覆盖已有文件。"),
@@ -219,40 +284,37 @@ const GUOBA_SCHEMAS = [
   textArea("remote.shells", "允许 shell", "每行一个：pwsh、powershell、cmd、bash、sh、zsh；主机需已安装对应 shell。"),
 
   group("B 站"),
-  textArea("bilibili.cookie", "B 站 Cookie", "长 Cookie 可直接粘贴。"),
-  password("bilibili.sessdata", "B 站 SESSDATA", "只需要 SESSDATA 时填写。"),
   number("bilibili.search_limit", "搜索结果数量", "解析搜索时的最大数量。"),
   sw("bilibili.download.enable", "启用视频下载", "视频解析后允许发送视频。"),
-  sw("bilibili.download.use_aria2", "使用 aria2", "可用时交给 aria2 下载。"),
-  input("bilibili.download.tools_path", "下载工具目录", "BBDown、ffmpeg、aria2 所在目录。"),
-  number("bilibili.download.resolution", "清晰度代码", "BBDown 使用的清晰度编号。"),
+  number("bilibili.download.concurrency", "下载并发", "JS 分段下载并发数，1–16。"),
+  input("bilibili.download.tools_path", "下载工具目录", "FFmpeg 所在目录。"),
+  select("bilibili.download.resolution", "视频清晰度", [
+    { label: "144P 极省流", value: 5 },
+    { label: "240P 极速", value: 6 },
+    { label: "360P 流畅", value: 16 },
+    { label: "480P 清晰", value: 32 },
+    { label: "720P 兼容档", value: 48 },
+    { label: "720P 高清", value: 64 },
+    { label: "720P 60 帧", value: 74 },
+    { label: "1080P 高清", value: 80 },
+    { label: "智能修复", value: 100 },
+    { label: "1080P 高码率", value: 112 },
+    { label: "1080P 60 帧", value: 116 },
+    { label: "4K 超清", value: 120 },
+    { label: "HDR 真彩", value: 125 },
+    { label: "杜比视界", value: 126 },
+    { label: "8K 超高清", value: 127 },
+    { label: "HDR Vivid", value: 129 },
+  ], "优先清晰度上限，默认 720P；实际取决于视频提供的档位与登录账号权限，不可用时选择可用档位。HDR、杜比视界还需要播放设备支持。"),
   number("bilibili.download.duration_limit_seconds", "视频时长限制", "单位秒。"),
   number("bilibili.download.video_size_limit_mb", "发送大小限制", "单位 MB。"),
-  number("bilibili.download.video_wx_limit_mb", "微信视频上限", "单位 MB，微信视频消息单文件上限，默认 20。"),
-  sw("bilibili.download.video_transcode.enable", "超限自动压缩", "超过微信上限时先用 ffmpeg 压缩，再以视频形式发送。"),
-  sw("bilibili.download.video_transcode.notify", "压缩提示", "压缩前先给触发者一条文字提示。"),
-  number("bilibili.download.video_transcode.target_mb", "压缩目标体积", "单位 MB，默认 19，需小于微信上限。"),
-  number("bilibili.download.video_transcode.max_height", "压缩最大高度", "0 表示不缩放，默认 1080。"),
-  number("bilibili.download.video_transcode.audio_kbps", "压缩音频码率", "单位 kbps，默认 96。"),
-  number("bilibili.download.video_transcode.min_video_kbps", "最低视频码率", "低于该码率宁可发文件，默认 150。"),
-  number("bilibili.download.video_transcode.max_duration_seconds", "压缩时长上限", "单位秒，0 表示不限制，默认 1800。"),
-  select("bilibili.download.video_transcode.preset", "压缩速度档", [
-    { label: "ultrafast（最快最糊）", value: "ultrafast" },
-    { label: "superfast", value: "superfast" },
-    { label: "veryfast（默认）", value: "veryfast" },
-    { label: "fast", value: "fast" },
-    { label: "medium（最慢最省）", value: "medium" },
-  ], "编码速度与体积的取舍，默认 veryfast。"),
-  sw("bilibili.download.cache_enable", "启用下载缓存", "复用已下载文件。"),
-  number("bilibili.download.cache_ttl_seconds", "缓存保留时间", "0 表示不自动过期。"),
-  number("bilibili.download.max_estimated_size_mb", "预估大小限制", "0 表示不限制。"),
+  number("bilibili.download.max_estimated_size_mb", "预估大小限制", "单位 MB，0 表示不限制。"),
   select("bilibili.download.multi_page_policy", "分 P 处理方式", [
     { label: "打包发送", value: "zip" },
     { label: "全部下载", value: "all" },
     { label: "只下首 P", value: "first" },
   ]),
   number("bilibili.download.timeout_ms", "下载超时", "单位毫秒。"),
-  textArea("bilibili.download.extra_args", "BBDown 附加参数", "每行一个参数。"),
 
   group("抖音"),
   sw("douyin.enable", "启用抖音解析", "解析分享链接；普通公开作品无需登录 Cookie。"),
@@ -275,10 +337,28 @@ const GUOBA_SCHEMAS = [
   sw("groups.cleanup.delete_orphan_profiles", "删除孤立配置", "没有可用通知路径时删除 profile。"),
   sw("groups.cleanup.keep_if_private_possible", "保留可私聊用户", "能私聊时保留用户配置。"),
 
-  group("网易云任务"),
-  sw("netease_partner.enable", "启用网易云任务", "总开关。"),
+  group("点歌"),
+  sw("music.enable", "启用点歌", "按平台搜索，播放自动启用多音源回退和 unblock。"),
+  select("music.default_platform", "默认音乐平台", [{label:"网易云",value:"netease"},{label:"QQ音乐",value:"qq"},{label:"酷狗",value:"kugou"},{label:"酷我",value:"kuwo"},{label:"咪咕",value:"migu"},{label:"汽水",value:"soda"}]),
+  select("music.quality", "音乐音质", [
+    { label: "自动选择", value: "auto" },
+    { label: "标准音质", value: "standard" },
+    { label: "较高音质", value: "higher" },
+    { label: "高品质", value: "high" },
+    { label: "无损音质", value: "lossless" },
+    { label: "Hi-Res 高解析度", value: "hires" },
+  ], "不同平台的档位与码率不同；实际音质受歌曲和登录账号权限限制。"),
+  number("music.search_limit", "每页歌曲数", "1–30。"),
+  number("music.session_timeout_ms", "选歌有效期", "单位毫秒。"),
+  number("music.download_timeout_ms", "音频下载超时", "单位毫秒。"),
+  number("music.max_size_mb", "音频体积上限", "单位 MiB。"),
+
+  group("TuneWeave 服务"),
   input("tuneweave.api_url", "TuneWeave 服务地址", "自托管 TuneWeave，默认 http://127.0.0.1:7832。"),
   number("tuneweave.request_timeout_ms", "TuneWeave 请求超时", "单位毫秒。"),
+  number("tuneweave.update_delay_ms", "开机环境维护延迟", "单位毫秒，默认 180000（三分钟）；统一检查模型、TuneWeave 与 FFmpeg。"),
+  group("网易云任务"),
+  sw("netease_partner.enable", "启用网易云任务", "总开关。"),
   cron("netease_partner.schedule", "执行时间", "自动任务 cron。"),
   sw("netease_partner.auto_catch_up", "启动补跑", "错过当天任务后启动补跑。"),
   sw("netease_partner.notify_master", "给主人发结果图", "自动任务完成后私聊给主人发送图片报告。"),
@@ -286,11 +366,19 @@ const GUOBA_SCHEMAS = [
   number("netease_partner.login_poll_ms", "登录轮询间隔", "单位毫秒。"),
   number("netease_partner.delay_ms_min", "最小操作间隔", "单位毫秒。"),
   number("netease_partner.delay_ms_max", "最大操作间隔", "单位毫秒。"),
-  textArea("netease_partner.comments", "默认评论", "每行一条评论。"),
+  select("netease_partner.review.mode", "乐评生成方式", [
+    { label: "固定评论库", value: "fixed" },
+    { label: "Responses API 联网生成", value: "responses" },
+    { label: "本机 Codex CLI 联网生成", value: "codex" },
+  ], "默认保留固定评论库。AI 模式结合歌曲、作者和歌词等资料联网核实；生成失败时跳过评论，不换成无关套话。"),
+  textArea("netease_partner.comments", "固定评论库", "仅固定模式使用，每行一条评论；更新不会覆盖已有配置。"),
+  number("netease_partner.review.max_chars", "乐评字数上限", "20～500 个字符，默认 140；这是可调整的保守生成限制，不代表已确认平台接口的硬性上限。"),
+  number("netease_partner.review.timeout_ms", "AI 乐评生成超时", "单位毫秒，默认 180000；超时后跳过本首评论。"),
+  input("netease_partner.review.codex_command", "Codex CLI 程序", "默认 codex，填写可执行文件名或绝对路径；需机器人运行用户提前完成本机 Codex 登录。"),
+  input("netease_partner.review.model", "乐评模型", "Codex CLI 留空沿用本机默认模型；Responses API 必须明确填写模型。"),
+  input("netease_partner.review.api_url", "Responses API 地址", "完整 Responses 接口地址，默认 https://api.openai.com/v1/responses；服务须支持 web_search 联网工具。"),
+  password("netease_partner.review.api_key", "Responses API 密钥", "仅 Responses 模式使用；Codex CLI 使用本机登录，不需要此密钥。"),
 
-  group("日志"),
-  number("logging.retention_days", "日志保留天数", "超过后可清理。"),
-  sw("logging.redact_sensitive", "脱敏日志", "隐藏 cookie、token、密钥等内容。"),
 
   group("图鉴"),
   input("atlas.data_root", "图鉴数据目录", "保存 map、index、items。"),
@@ -307,7 +395,7 @@ const GUOBA_SCHEMAS = [
   input("atlas.version_command", "版本检查命令", "检查远端版本命令。"),
   textArea("atlas.version_args", "版本检查参数", "每行一个参数。"),
   number("atlas.update_timeout_ms", "图鉴更新超时", "单位毫秒。"),
-  number("atlas.update_output_limit", "图鉴输出限制", "超过后截断。"),
+  number("atlas.update_output_limit", "图鉴输出限制", "单位字符，超过后截断。"),
   sw("atlas.auto_update.enable", "启用图鉴定时更新", "按版本变化自动增量更新。"),
   cron("atlas.auto_update.check_cron", "图鉴检查频率", "检查版本变化的 cron。"),
   cron("atlas.auto_update.challenge_cron", "挑战刷新频率", "挑战轮换独立增量刷新的 cron。"),
@@ -342,8 +430,7 @@ export function supportGuoba() {
       isV2: false,
       description: "米哈游登录、签到、图鉴、工具链与远程管理。",
       icon: "mdi:flower-tulip-outline",
-      // 与默认主题（crystal）的强调色一致：锅巴插件列表里的荷花卡片同色系
-      iconColor: "#2F86C4",
+      iconColor: "#66ccff",
     },
     configInfo: {
       schemas: GUOBA_SCHEMAS,
@@ -355,8 +442,19 @@ export function supportGuoba() {
         try {
           const current = await loadGlobalConfig({ createIfMissing: true })
           const next = applyGuobaFormData(current, data)
+          // 配色单独落到 .env（global.yaml 的 render 段会被配置迁移删掉）
+          let themeChanged = ""
+          if (hasSubmittedValue(data, "render.theme")) {
+            const theme = String(getSubmittedValue(data, "render.theme") || "").trim()
+            if (theme && theme !== (readEnvTheme() || "crystal")) {
+              await writeEnvTheme(theme)
+              themeChanged = theme
+            }
+          }
           await saveGlobalConfig(next)
-          return Result.ok({}, "保存成功")
+          return Result.ok({}, themeChanged
+            ? `保存成功；卡片配色已切换为 ${themeChanged}，重启机器人后生效。`
+            : "保存成功")
         } catch (error) {
           return Result.error(`保存失败：${error.message}`)
         }
@@ -369,6 +467,11 @@ export function toGuobaFormData(config) {
   const result = {}
   for (const schema of GUOBA_SCHEMAS) {
     if (!schema.field) continue
+    // 配色不在 global.yaml 里，直接回读 .env 的 LOTUS_THEME，避免下拉框永远空着
+    if (schema.field === "render.theme") {
+      setPath(result, schema.field, readEnvTheme() || "crystal")
+      continue
+    }
     let value = getPath(config, schema.field)
     if (CRON_FIELDS.has(schema.field)) value = quartzCronToGuobaCron(value)
     setPath(result, schema.field, ARRAY_FIELDS.has(schema.field) ? arrayToText(value) : value)
@@ -380,7 +483,10 @@ export function applyGuobaFormData(config, data = {}) {
   const next = structuredClone(config)
   for (const schema of GUOBA_SCHEMAS) {
     if (!schema.field || !hasSubmittedValue(data, schema.field)) continue
+    // render.* 会被 migrateGlobalConfig 删掉，配色由 setConfigData 单独写 .env
+    if (schema.field.startsWith("render.")) continue
     let value = getSubmittedValue(data, schema.field)
+    if (CRON_FIELDS.has(schema.field) && value === quartzCronToGuobaCron(getPath(config, schema.field))) value = getPath(config, schema.field)
     if (ARRAY_FIELDS.has(schema.field)) value = textToArray(value)
     if (NUMBER_FIELDS.has(schema.field)) value = toNumber(value)
     setPath(next, schema.field, value)
@@ -501,7 +607,7 @@ function arrayToText(value) {
 function textToArray(value) {
   if (Array.isArray(value)) return value.map(item => String(item).trim()).filter(Boolean)
   return String(value || "")
-    .split(/[\n,]/)
+    .split(/\r?\n/)
     .map(item => item.trim())
     .filter(Boolean)
 }
@@ -517,7 +623,7 @@ function toNumber(value) {
   return Number(value)
 }
 
-function getPath(target, path) {
+export function getPath(target, path) {
   let current = target
   for (const key of parsePath(path)) {
     if (current == null) return undefined

@@ -18,7 +18,6 @@ const ATLAS_CHALLENGE_SCOPE_ARGS = Object.freeze([
 
 export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
   version: CURRENT_GLOBAL_CONFIG_VERSION,
-  // 上游 1aa94b2/9dbf851/a8c736c 新增：货币商店（coin shop）自动兑换 + 带鉴权 Web 管理页
   coin_shop: {
     enable: true,
     mode: "auto",
@@ -28,46 +27,15 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
     public_url: "",
     icp_number: "",
     session_hours: 8,
-  },
-  // 功能模块开关（锅巴「功能开关」）：键 = core/config/modules.js 注册表 id。
-  // 缺省 / true = 启用；显式 false = 关闭（命令回复提示并吞掉）。签到链路走 scheduler.* 独立开关，不在此列。
-  modules: {},
-  // 命令路由（锅巴「命令路由」）：控制荷花查询类模块的拦截优先级。
-  // 签到链路（体力/签到/社区签到/自动签到/扫码登录/签到设置/验证码）固定走 -Infinity，不由此处控制。
-  // query_priority：查询类模块的 priority，数值越小越先；默认 5001 = 排在 miao / ZZZ / Atlas 的 5000 之后，
-  //   由上游插件先接管、荷花兜底。设成负数可让荷花抢回最前。
-  // front_modules：需要无视上面数值、固定抢回最前（-Infinity）的模块 id 列表，id 取 core/config/modules.js。
-  routing: {
-    query_priority: 5001,
-    front_modules: [],
-  },
-  // 锅巴「快捷操作」：键 = guoba.actions.js 注册表 id。开关恒为 false 存储；
-  // 锅巴保存时从 关→开 = 触发一次执行，写回前复位为 false（见 guoba.support.js）。
-  // command_text：自定义指令文本（每行一条前台指令，关→开时逐条执行）。
-  // command_blacklist：指令黑名单（子串匹配，命中即拒绝；设为 [] = 放行全部）。
-  actions: {
-    command_text: "",
-    command_blacklist: ["更新图鉴", "远程"],
-  },
-  render: {
-    background: [
-      "https://api.lvxiaodong.com/api/ys?return=json",
-      "https://api.horosama.com/random.php?name=genshin&type=pc&resolution=4k&format=json",
-      "https://api.dreamofice.cn/hoyorandom/img?game=ys&type=json",
-      "https://api.github.com/repos/Zeal-L/Honkai-Star-Rail-Wallpaper/contents/Offcial?ref=main",
-      "https://api.dujin.org/pic/yuanshen/",
-    ],
-    theme_color: "#66ccff",
-    // 配色主题（crystal 清透冰雾 / mist 云雾奶油 / saas 扁平 SaaS / ice 冰蓝毛玻璃 /
-    //   aurora 赛博极光 / dawn 晨曦微光 / light 明亮通透 / glass 提亮玻璃 / dark 上游深色）
-    // 全插件所有卡片共用；改这里即全局生效，入口命令无需重启参数。
-    theme: "crystal",
-    background_timeout_ms: 3000,
+    panel_session_hours: 24,
+    ticket_minutes: 10,
+    panel_ticket_minutes: 10,
   },
   scheduler: {
     enable: true,
     plan_generate_cron: "0 0 0 * * ? *",
     run_due_cron: "0 * * * * ? *",
+    catch_up_cron: "0 */10 * * * ? *",
     mode: "fixed",
     fixed_time: "04:30",
     random: {
@@ -81,30 +49,45 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
       window_end: "23:59",
       notify: true,
     },
+    // 通知开关（代码判 === false 才算关，缺省即开启；显式写出来锅巴才能显示正确状态）
+    notify_enabled: true,
+    notify_image: true,
+    // 全局强制关闭（对应 #全局关闭原神签到 等指令），true = 无视个人设置跳过该游戏
     forced_disables: {
-      checkin_all: false,
       genshin: false,
       honkai_sr: false,
       zzz: false,
       mihoyobbs: false,
     },
-    // 自动补签：每日定时对当日签到失败条目自动重试一次。
-    // 登录状态失效类失败不重试（黑名单见 services/checkin/autoResign.js）；成功才通知用户。
-    auto_resign: {
-      enable: true,
-      cron: "0 0 12 * * ? *",
-      notify_on_success: true,
-    },
   },
-  // 体力推送（移植自 ji-plugin note.js 的体力阈值推送）
-  // 命令：#开启体力推送 [uid] / #关闭体力推送 [uid] / #体力推送阈值 <n>（可前缀 原神/星铁/绝区零）
-  resin_push: {
-    enable: true,
-    cron: "0 */10 * * * ? *",
-    cooldown_hours: 6,
-    gs_threshold: 160,
-    sr_threshold: 240,
-    zzz_threshold: 240,
+  checkin: {
+    // 签到结果卡的显示开关（锅巴「签到卡片」分组）。
+    display: {
+      // 只列出账号实际在玩（有角色 / 本次真签到到）的游戏，不再把全部游戏铺一遍
+      auto_hide: true,
+      // 「社区（米游社）」汇总行
+      community: true,
+      games: {
+        genshin: true,
+        honkai2: true,
+        honkai3rd: true,
+        tears_of_themis: true,
+        villa: true,
+        honkai_sr: true,
+        zzz: true,
+        hna: true,
+        starry: true,
+      },
+    },
+    // 签到链路的验证码桥（与通用 captcha.* 分开：桥只能原地重试，无法刷新 challenge）
+    captcha: {
+      // 免人工方案白名单；gtmanual 要人点链接，群里静默签到没人看得到，故不在默认列表
+      providers: ["test_nine", "ttocr", "vision_ai"],
+      // 同一个 challenge 上最多打几次（默认 2：一次原试 + 一次换方案/重试）
+      provider_attempts: 2,
+      // 整条链重跑轮数；默认 1，调大只会反复打同一个 challenge
+      chain_attempts: 1,
+    },
   },
   captcha: {
     providers: ["test_nine", "ttocr", "gtmanual"],
@@ -122,11 +105,8 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
     },
     test_nine: {
       enable: true,
-      auto_start: true,
       endpoint: "http://127.0.0.1:9645/pass_uni",
-      timeout_ms: 20000,
-      submodule_path: "test_nine",
-      venv_path: "data/python/test_nine_venv",
+      timeout_ms: 60000,
       model_dir: "data/test_nine/model",
       model_repo: "luguoyixiazi/model_save",
       model_files: [
@@ -136,21 +116,20 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
         "dinov3-small.onnx",
         "atten.onnx",
       ],
-      install_requirements: true,
-      download_models: true,
     },
     ttocr: {
       enable: false,
       api: "http://api.ttocr.com/api/recognize",
       resapi: "http://api.ttocr.com/api/results",
       key: "",
+      itemid_v4: 488,
       query: "itemid=388&referer=https://webstatic.mihoyo.com/",
-      poll_interval_ms: 1000,
+      poll_interval_ms: 2000,
       timeout_ms: 60000,
     },
     gtmanual: {
       enable: true,
-      address: "https://gt.lotusshared.cn/",
+      internal_enable: true,
       verify_addr: "https://gt.lotusshared.cn/GTest/register?key=114514",
       timeout_ms: 180000,
       poll_interval_ms: 1500,
@@ -161,44 +140,16 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
       key: "",
       timeout_ms: 60000,
     },
-    // lulu / plao 外部付费 geetest 过码（移植自 ji-plugin）。token 需自行购买并注入。
-    // provider 指定首选（lulu/plao），未配置 token 时该 provider 自动跳过，由其它 provider 兜底。
-    lulu_plao: {
-      enable: false,
-      provider: "lulu",
-      lulu_url: "https://api.sayu-bot.com",
-      lulu_token: "",
-      plao_url: "http://api.114514616.xyz",
-      plao_token: "",
-      timeout_ms: 15000,
-    },
-  },
-  python: {
-    mode: "venv",
-    venv_path: "data/python/venv",
-    system_python: "",
   },
   tools: {
-    auto_install: true,
     dir: "data/tools",
     bin_dir: "data/tools/bin",
     github_api: "https://api.github.com",
     timeout_ms: 300000,
     download_retries: 3,
-    bbdown: {
-      enable: true,
-      repo: "MOPELotus/BBDown",
-      command: "BBDown",
-    },
     ffmpeg: {
-      enable: true,
       repo: "BtbN/FFmpeg-Builds",
       command: "ffmpeg",
-    },
-    aria2: {
-      enable: true,
-      repo: "aria2/aria2",
-      command: "aria2c",
     },
   },
   remote: {
@@ -216,44 +167,17 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
     shells: ["pwsh", "powershell", "cmd", "bash", "sh", "zsh"],
   },
   bilibili: {
-    cookie: "",
-    sessdata: "",
     search_limit: 10,
     download: {
       enable: true,
-      use_aria2: true,
+      concurrency: 4,
       tools_path: "data/tools/bin",
       resolution: 64,
       duration_limit_seconds: 3600,
       video_size_limit_mb: 100,
-      video_wx_limit_mb: 20,
-      video_transcode: {
-        enable: true,
-        notify: true,
-        target_mb: 19,
-        max_height: 1080,
-        audio_kbps: 96,
-        min_video_kbps: 150,
-        max_duration_seconds: 1800,
-        preset: "veryfast",
-        timeout_ms: 900000,
-      },
-      // 大文件 HTTP 中转：超微信上限且压缩不可用时，落盘挂链接而不直发微信文件通道
-      //（hook 微信发大文件有崩客户端风险）。清理随 B 站每日清理任务执行。
-      video_relay: {
-        enable: true,
-        ttl_hours: 10 / 60, // 10 分钟：中转链接超时就失效并清理，避免占用本地存储
-        max_total_size_mb: 2048,
-        // 只有达到该大小（MB）才进中转；缺省 null = 回退到 video_wx_limit_mb，
-        // 即「能作为视频消息直发的不中转」。配 0 = 全部进中转。
-        min_size_mb: null,
-      },
       max_estimated_size_mb: 0,
       multi_page_policy: "zip",
-      cache_enable: true,
-      cache_ttl_seconds: 0,
       timeout_ms: 600000,
-      extra_args: [],
     },
   },
   douyin: {
@@ -282,6 +206,16 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
   tuneweave: {
     api_url: "http://127.0.0.1:7832",
     request_timeout_ms: 30000,
+    update_delay_ms: 180000,
+  },
+  music: {
+    enable: true,
+    default_platform: "netease",
+    quality: "standard",
+    search_limit: 10,
+    session_timeout_ms: 120000,
+    download_timeout_ms: 180000,
+    max_size_mb: 128,
   },
   netease_partner: {
     enable: false,
@@ -293,10 +227,15 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
     delay_ms_min: 8000,
     delay_ms_max: 11000,
     comments: ["打卡支持"],
-  },
-  logging: {
-    retention_days: 14,
-    redact_sensitive: true,
+    review: {
+      mode: "fixed",
+      max_chars: 140,
+      timeout_ms: 180000,
+      codex_command: "codex",
+      model: "",
+      api_url: "https://api.openai.com/v1/responses",
+      api_key: "",
+    },
   },
   atlas: {
     data_root: "data/atlas",
@@ -348,9 +287,6 @@ export const DEFAULT_GLOBAL_CONFIG = Object.freeze({
         policy: "master_only",
       },
       "scheduler.manage": {
-        policy: "master_only",
-      },
-      "permissions.manage": {
         policy: "master_only",
       },
       "remote.spawn": {

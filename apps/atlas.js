@@ -11,10 +11,19 @@ import {
   NanokaAtlasService,
   parseAtlasShortcutMessage,
   resetAtlasAliasCache,
+  resolveAtlasAliasName,
+  resolveSignatureWeapon,
   selectAtlasTemplate,
 } from "../services/nanokaAtlas/service.js"
 import { AtlasUpdateService, readLocalVersionSnapshot } from "../services/nanokaAtlas/update.js"
+import { submitAtlasUpdate } from "../services/nanokaAtlas/updateTask.js"
+import { notifyUser } from "../core/transport/notify.js"
 import { findGuideCard, guideCardStats } from "../services/nanokaAtlas/guide-cards.js"
+import {
+  getAtlasBlacklistStatus,
+  isAtlasBlacklisted,
+} from "../services/nanokaAtlas/blacklist.js"
+import { formatDelta, formatNumber } from "../services/nanokaAtlas/stats.js"
 
 // view.kind → 图鉴三模块（成品卡目录）
 const GUIDE_KIND_BY_VIEW = { character: "character", weapon: "weapon", relic: "artifact" }
@@ -31,6 +40,15 @@ function findPresetGuideCard(data) {
   return globalThis.segment?.image ? globalThis.segment.image(`file://${file}`) : `file://${file}`
 }
 
+/**
+ * 用户黑名单守卫：命中时返回 false，Yunzai loader 会继续把消息交给后续插件。
+ * 注意不能用 accept() 返回 "return" —— 那会掐断所有插件，不是放行。
+ * 任何读取 / 解析异常都 fail-open，绝不因为黑名单本身卡住消息。
+ */
+async function atlasBlacklistHit(e) {
+  return isAtlasBlacklisted(e)
+}
+
 export class LotusAtlas extends BasePlugin {
   constructor() {
     super({
@@ -38,9 +56,9 @@ export class LotusAtlas extends BasePlugin {
       dsc: "Lotus nanoka atlas query",
       event: "message",
       priority: resolvePriority("atlas"),
-      rule: composeAtlasRules(),
+      rule: getSharedAtlasRules(),
     })
-    this.shortcutRouteStats = { rules: 0 }
+    this.shortcutRouteStats = { ...sharedRouteStats }
     this.task = [
       ...this.buildAtlasTasks(),
     ]
@@ -85,8 +103,9 @@ export class LotusAtlas extends BasePlugin {
     // 使本次路由刷新重建时重新读取最新别名，实现热重载（无需重启 bot）。
     resetAtlasAliasCache()
     const result = await buildAtlasShortcutRules(options)
-    this.rule = composeAtlasRules(result.rules || [])
-    this.shortcutRouteStats = result.stats || { rules: 0 }
+    // 原地替换共享数组：priority 实例 / init 实例 / 每条消息新建实例同时生效
+    this.rule = replaceSharedAtlasRules(result.rules || [], result.stats || { rules: 0 })
+    this.shortcutRouteStats = { ...sharedRouteStats }
     globalThis.logger?.mark?.(`[Lotus-Plugin] atlas shortcut routes refreshed: ${this.shortcutRouteStats.rules || 0} rule(s), ${this.shortcutRouteStats.directNames || 0} direct name(s), ${this.shortcutRouteStats.roleNames || 0} role name(s)`)
     return result
   }
@@ -94,6 +113,7 @@ export class LotusAtlas extends BasePlugin {
   async status() {
     const status = await new NanokaAtlasService().status()
     const cards = guideCardStats()
+    const blacklist = await getAtlasBlacklistStatus()
     const cardText = [
       `角色 ${cards.character?.count || 0}`,
       `武器 ${cards.weapon?.count || 0}`,
@@ -114,6 +134,7 @@ export class LotusAtlas extends BasePlugin {
         { label: "Locale", value: status.locale },
         { label: "成品卡", value: cardText },
         { label: "卡面来源", value: Object.values(cards).some(c => c.source === "local") ? "Lotus 本地" : "借 Atlas 源" },
+        { label: "黑名单", value: blacklist.exists ? `${blacklist.count} 条生效 / ${blacklist.invalid.length} 条无效` : "未配置" },
       ],
     }, {
       saveId: `lotus-atlas-status-${this.e.user_id || "user"}`,
@@ -126,39 +147,39 @@ export class LotusAtlas extends BasePlugin {
     const permission = await this.assertUpdatePermission("图鉴更新")
     if (!permission) return true
 
-    await replyText(this, "[荷花插件]正在检查图鉴版本；首次缺数据会全量拉取，后续版本变化才增量更新。")
     const globalConfig = await loadGlobalConfig()
-    const result = await new AtlasUpdateService().checkAndRun(globalConfig.atlas || {})
-    await this.refreshRoutesAfterAtlasUpdate(result)
-    const image = await renderAtlasUpdateResult(result, this.e.user_id)
-    await replyImage(this, image, atlasUpdateMessage(result))
-    return true
+    return submitAtlasTaskInteractive(this, {
+      config: globalConfig.atlas || {},
+      mode: "check",
+      label: "图鉴更新",
+      startText: "[荷花插件]正在检查图鉴版本；首次缺数据会全量拉取，后续版本变化才增量更新。",
+    })
   }
 
   async checkAtlasUpdate() {
     const permission = await this.assertUpdatePermission("图鉴版本检查")
     if (!permission) return true
 
-    await replyText(this, "[荷花插件]正在检查图鉴版本差异。")
     const globalConfig = await loadGlobalConfig()
-    const result = await new AtlasUpdateService().checkAndRun(globalConfig.atlas || {})
-    await this.refreshRoutesAfterAtlasUpdate(result)
-    const image = await renderAtlasUpdateResult(result, this.e.user_id)
-    await replyImage(this, image, atlasUpdateMessage(result))
-    return true
+    return submitAtlasTaskInteractive(this, {
+      config: globalConfig.atlas || {},
+      mode: "check",
+      label: "图鉴版本检查",
+      startText: "[荷花插件]正在检查图鉴版本差异。",
+    })
   }
 
   async fullUpdateAtlas() {
     const permission = await this.assertUpdatePermission("图鉴全量更新")
     if (!permission) return true
 
-    await replyText(this, "[荷花插件]正在启动 nanoka-atlas-backend 全量抓取，首次初始化会比较久。")
     const globalConfig = await loadGlobalConfig()
-    const result = await new AtlasUpdateService().run(globalConfig.atlas || {}, { mode: "initial" })
-    await this.refreshRoutesAfterAtlasUpdate(result)
-    const image = await renderAtlasUpdateResult(result, this.e.user_id)
-    await replyImage(this, image, result.ok ? "[荷花插件]图鉴全量更新完成。" : "[荷花插件]图鉴全量更新失败。")
-    return true
+    return submitAtlasTaskInteractive(this, {
+      config: globalConfig.atlas || {},
+      mode: "initial",
+      label: "图鉴全量更新",
+      startText: "[荷花插件]正在启动 nanoka-atlas-backend 全量抓取，首次初始化会比较久。",
+    })
   }
 
   async resetAtlas() {
@@ -213,14 +234,11 @@ export class LotusAtlas extends BasePlugin {
     if (globalConfig.atlas?.auto_update?.enable === false) {
       return { ok: true, skipped: true, reason: "auto_update_disabled" }
     }
-    const result = await new AtlasUpdateService().checkAndRun(globalConfig.atlas || {})
-    if (result.ok && !result.skipped) {
-      await this.refreshRoutesAfterAtlasUpdate(result)
-      logger?.mark?.(`[Lotus-Plugin] atlas ${result.mode || "update"} completed`)
-    } else if (!result.ok) {
-      logger?.warn?.(`[Lotus-Plugin] atlas update failed: ${result.reason}`)
-    }
-    return result
+    return submitAtlasTaskScheduled(this, {
+      config: globalConfig.atlas || {},
+      mode: "check",
+      label: "定时版本检查",
+    })
   }
 
   async runAtlasChallengeAutoUpdate({ startup = false } = {}) {
@@ -233,14 +251,12 @@ export class LotusAtlas extends BasePlugin {
     if (!local.ready) {
       return { ok: true, skipped: true, reason: "base_atlas_missing" }
     }
-    const result = await new AtlasUpdateService().run(config, { mode: "challenge" })
-    if (result.ok) {
-      await this.refreshRoutesAfterAtlasUpdate(result)
-      if (!startup) logger?.mark?.("[Lotus-Plugin] atlas challenge refresh completed")
-    } else {
-      logger?.warn?.("[Lotus-Plugin] atlas challenge refresh failed: " + (result.reason || "unknown"))
-    }
-    return result
+    return submitAtlasTaskScheduled(this, {
+      config,
+      mode: "challenge",
+      label: "挑战刷新",
+      startup,
+    })
   }
 
   async refreshRoutesAfterAtlasUpdate(result) {
@@ -262,6 +278,73 @@ export class LotusAtlas extends BasePlugin {
     return true
   }
 
+  // #角色名专武 → 别名表解析专武 → 成品卡直发；找不到武器卡时回退通用查询
+  async weaponByChar() {
+    const raw = String(this.e.msg || "").replace(/^[#＃]/, "").replace(/专武$/u, "").trim()
+    if (!raw) return false
+    // 排除常见误触（攻略/统计类长句）
+    if (/攻略|练度|统计|面板/.test(raw)) return false
+    // 群聊裸文本（无 #）需指向荧，避免闲聊「我的专武」误触
+    const isExplicit = /^[#＃]/.test(String(this.e.msg || ""))
+    if (!isExplicit && this.e.isGroup) {
+      const text = String(this.e.msg || "")
+      const atSelf = Array.isArray(this.e.message) && this.e.message.some(
+        s => s && s.type === "at" && String(s.qq || s.user_id || "") === String(this.e.self_id || "")
+      )
+      if (!/荧|Ying/i.test(text) && !atSelf) return false
+    }
+    const candidates = []
+    const sig = await resolveSignatureWeapon(raw).catch(() => null)
+    if (sig) candidates.push(sig)
+    candidates.push(raw) // 回退：输入本身可能是武器名/别名（如 蝶变专武→蝶变）
+    for (const name of candidates) {
+      const card = findGuideCard("weapon", name)
+      if (!card?.file) continue
+      const seg = globalThis.segment?.image ? globalThis.segment.image(`file://${card.file}`) : `file://${card.file}`
+      await replyImage(this, seg, "")
+      return true
+    }
+    return false
+  }
+
+  // #xx套 / #xx套装 → 别名表解析圣遗物套装 → 成品卡直发，无卡走 nanoka 渲染，查无此名放行
+  async artifactBySet() {
+    const msg = String(this.e.msg || "")
+    const isExplicit = /^[#＃]/.test(msg)
+    const raw = msg.replace(/^[#＃]/, "").replace(/(?:套装|套)$/u, "").trim()
+    if (!raw) return false
+    // 群聊裸文本（无 #）需指向荧，防闲聊「一套」「三件套」误触
+    if (!isExplicit && this.e.isGroup) {
+      const atSelf = Array.isArray(this.e.message) && this.e.message.some(
+        s => s && s.type === "at" && String(s.qq || s.user_id || "") === String(this.e.self_id || "")
+      )
+      if (!/荧|Ying/i.test(msg) && !atSelf) return false
+    }
+    // 候选名：本名 + 别名解析出的标准名
+    const names = [raw]
+    const alias = await resolveAtlasAliasName(raw).catch(() => null)
+    if (alias?.value) names.unshift(alias.value)
+    // ① 成品卡直发
+    for (const name of names) {
+      const card = findGuideCard("artifact", name)
+      if (!card?.file) continue
+      const seg = globalThis.segment?.image ? globalThis.segment.image(`file://${card.file}`) : `file://${card.file}`
+      await replyImage(this, seg, `${name} · 圣遗物图鉴`)
+      return true
+    }
+    // ② nanoka 数据渲染兜底（血红之证等新套装在数据里但无成品卡）
+    for (const name of names) {
+      const result = await new NanokaAtlasService().search(name, {
+        game: "原神", pages: ["artifact"], minScore: 100, strict: true,
+      }).catch(() => null)
+      if (!result?.ok) continue
+      const image = await renderAtlasSearchResult(result, this.e.user_id)
+      await replyImage(this, image, "[荷花插件]圣遗物图鉴查询完成。")
+      return true
+    }
+    return false
+  }
+
   async shortcutQuery() {
     const parsed = parseAtlasShortcutMessage(this.e.msg)
     if (!parsed.ok) return false
@@ -276,6 +359,14 @@ export class LotusAtlas extends BasePlugin {
         strict: !parsed.challenge,
       })
       if (!result.ok) {
+        // 成品卡兜底：nanoka 数据缺失但本地三模块有成品图时直发（圣遗物/角色/武器都查一遍）
+        for (const kind of ["character", "weapon", "artifact"]) {
+          const card = findGuideCard(kind, parsed.query)
+          if (!card?.file) continue
+          const seg = globalThis.segment?.image ? globalThis.segment.image(`file://${card.file}`) : `file://${card.file}`
+          await replyImage(this, seg, `${parsed.query} · 图鉴`)
+          return true
+        }
         if (shouldPassThroughShortcutFailure(parsed, result)) return false
         const image = await renderAtlasSearchResult(result, this.e.user_id)
         await replyImage(this, image, atlasFailureReply(result))
@@ -318,6 +409,7 @@ export class LotusAtlas extends BasePlugin {
         { label: "挑战图鉴", value: "#本期幽境图鉴 / #本期幻想图鉴 / *上期末日图鉴 / %下期防卫战图鉴" },
         { label: "不抢占", value: "#深渊 / #幻想 / #幽境 / *混沌 / %防卫战 仍交给挑战数据插件" },
         { label: "状态", value: "#图鉴状态" },
+        { label: "避让", value: "#图鉴黑名单 / config/atlas-blacklist.yaml" },
         { label: "更新", value: "#更新图鉴" },
         { label: "全量", value: "#全量更新图鉴" },
         { label: "重置", value: "#重置图鉴（只清插件缓存）" },
@@ -330,6 +422,110 @@ export class LotusAtlas extends BasePlugin {
     await replyImage(this, image, "[荷花插件]图鉴帮助生成完成。")
     return true
   }
+
+  // 用户黑名单诊断：查看当前生效规则 / 无效规则，验证 yaml 热重载是否已生效
+  async blacklistStatus() {
+    const info = await getAtlasBlacklistStatus()
+    const preview = info.patterns.slice(0, 8).map((item, index) =>
+      `${index + 1}. ${item.source}${item.flags ? ` [${item.flags}]` : ""}`,
+    )
+    const image = await renderStatusCard({
+      title: "图鉴黑名单",
+      subtitle: info.file,
+      badge: info.exists ? (info.enabled && info.count ? "ON" : "OFF") : "MISSING",
+      message: info.exists
+        ? "命中完整消息的正则时，图鉴不接管、不回复，直接放行给其它插件；保存 yaml 后约 0.5 秒自动生效，无需重启。"
+        : "尚未创建黑名单文件；把 config/atlas-blacklist.yaml.example 复制为 atlas-blacklist.yaml 即可启用。",
+      userId: this.e?.user_id || "user",
+      items: [
+        { label: "状态", value: info.exists ? (info.enabled ? "已启用" : "已停用") : "未配置" },
+        { label: "生效规则", value: `${info.count} 条` },
+        { label: "无效规则", value: `${info.invalid.length} 条` },
+        { label: "解析错误", value: info.error || "无" },
+        { label: "规则预览", value: preview.length ? preview.join("\n") : "（空）" },
+      ],
+    }, {
+      saveId: `lotus-atlas-blacklist-${this.e?.user_id || "user"}`,
+    })
+    await replyImage(this, image, "[荷花插件]图鉴黑名单状态生成完成。")
+    return true
+  }
+}
+
+/**
+ * 给每条 rule 套一层「用户黑名单」守卫。
+ *
+ * 为什么改 fnc 而不是逐方法加判断：Yunzai loader 用的是
+ *   i.plugin.rule（加载期实例） + new i.class(e)[v.fnc]（每条消息新建实例）
+ * 两个不同实例，所以守卫方法必须挂在 prototype 上才能对所有实例生效；
+ * 同时本插件还有 gatePluginModules / silencePluginLogs 两层包装子类，
+ * 保持原 fnc 名不变、只在外层加一道 fnc，模块开关与日志抑制行为都不会变。
+ *
+ * 守卫命中 → 返回 false：loader 的 `if (res === false) continue` 会继续匹配
+ * 本插件后续 rule，最终交给后面的插件；不回复、不渲染、不吞消息。
+ */
+/**
+ * 修「启动刷新的快捷路由没落到消息处理实例」的既有 BUG。
+ *
+ * Yunzai 的 loadPlugin() 在第一个实例上 await init()，随后 new 第二个实例塞进 priority；
+ * deal() 用的是 i.plugin.rule（第二个实例）。以前 init() 里刷出来的 221 条快捷路由
+ * 只留在被丢弃的第一个实例上，消息侧永远只有 20 条基础规则。
+ *
+ * 修法：所有实例共用同一份 rule 数组引用。构造器取共享数组；刷新时原地 splice，
+ * 于是任何实例（含 loader.priority 里那个）都立刻看到最新规则，无需访问 loader 单例。
+ * 运行期替换的条目必须：
+ *   ① reg 已是 RegExp —— loader 只在加载期做字符串→RegExp 转换，之后直接 v.reg.test()；
+ *   ② 复刻 silencePluginLogs 的 log / __lotusExplicitRule 约定，避免日志与模块开关语义漂移。
+ * 第二个实例在 init() 之后才构造，因此也能直接读到 sharedShortcutRules。
+ */
+let sharedAtlasRules = null
+let sharedShortcutRules = []
+let sharedRouteStats = { rules: 0 }
+
+function makeAtlasRules(shortcutRules) {
+  return guardAtlasRules(composeAtlasRules(shortcutRules)).map(rule => ({
+    ...rule,
+    reg: rule.reg instanceof RegExp ? rule.reg : new RegExp(rule.reg),
+    __lotusExplicitRule: rule.__lotusExplicitRule ?? (rule.log !== false),
+    log: false,
+  }))
+}
+
+function getSharedAtlasRules() {
+  if (!sharedAtlasRules) sharedAtlasRules = makeAtlasRules(sharedShortcutRules)
+  return sharedAtlasRules
+}
+
+function replaceSharedAtlasRules(shortcutRules, stats) {
+  sharedShortcutRules = shortcutRules || []
+  sharedRouteStats = stats || { rules: 0 }
+  const next = makeAtlasRules(sharedShortcutRules)
+  const current = getSharedAtlasRules()
+  current.splice(0, current.length, ...next)
+  return current
+}
+
+const GUARD_PREFIX = "__atlasGuarded_"
+
+function guardAtlasRules(rules = []) {
+  return rules.map(rule => {
+    if (!rule?.fnc) return rule
+    const original = String(rule.fnc).startsWith(GUARD_PREFIX)
+      ? String(rule.fnc).slice(GUARD_PREFIX.length)
+      : String(rule.fnc)
+    const name = `${GUARD_PREFIX}${original}`
+    if (typeof LotusAtlas.prototype[name] !== "function") {
+      Object.defineProperty(LotusAtlas.prototype, name, {
+        configurable: true,
+        writable: true,
+        value: async function atlasGuardedEntry(e) {
+          if (await atlasBlacklistHit(e)) return false
+          return this[original]?.(e)
+        },
+      })
+    }
+    return { ...rule, fnc: name }
+  })
 }
 
 function composeAtlasRules(shortcutRules = []) {
@@ -359,6 +555,10 @@ function composeAtlasRules(shortcutRules = []) {
       fnc: "help",
     },
     {
+      reg: "^#?(Lotus|lotus|荷花)?图鉴黑名单$",
+      fnc: "blacklistStatus",
+    },
+    {
       reg: "^#?(Lotus|lotus|荷花)?图鉴\\s*[\\s\\S]+$",
       fnc: "query",
     },
@@ -369,6 +569,15 @@ function composeAtlasRules(shortcutRules = []) {
     {
       reg: "^(?!#[\\s\\S]*(?:攻略|练度统计)[\\s\\S]*$)#(?:星铁|星穹铁道|崩坏星穹铁道|崩铁|绝区零|绝区|原神)?[\\s\\S]{1,}图鉴$",
       fnc: "shortcutQuery",
+    },
+    {
+      reg: "^#?(.+?)专武$",
+      fnc: "weaponByChar",
+    },
+    {
+      // #血红套 / #深廊套 / #冰风套 → 别名表解析套装 → 成品卡 / nanoka 渲染兜底
+      reg: "^#?(.+?)(?:套装|套)$",
+      fnc: "artifactBySet",
     },
     {
       reg: "^(?!#(?:今日|今天|每日|我的|明天|明日|周(?:[1-7]|一|二|三|四|五|六|日))*(?:素材|材料|天赋)[ |0-9]*(?:图鉴)?$)[#*%％][\\s\\S]{1,}(?:命座|星魂|影画|天赋)(?:图鉴)?$",
@@ -432,43 +641,173 @@ export async function sendAtlasSearchResult(target, result, options = {}) {
   return replyImage(target, await renderAtlasSearchResult(result, target.e?.user_id), result.ok ? "[荷花插件]图鉴查询完成。" : "[荷花插件]没有找到图鉴结果。")
 }
 
-async function renderAtlasUpdateResult(result, userId) {
-  const changed = result.check?.diff?.changes || result.diff?.changes || []
-  return renderStatusCard({
+/**
+ * 手动指令入口：提交后台任务并立即回一条受理提示，完成后由 onDone 发结果图。
+ * 全量抓取最长 30 分钟且会重建 data/，因此所有入口统一走 updateTask 的互斥队列。
+ */
+async function submitAtlasTaskInteractive(plugin, { config = {}, mode = "check", label = "图鉴更新", startText = "" } = {}) {
+  const submission = submitAtlasUpdate({
+    config,
+    mode,
+    label,
+    onDone: async result => {
+      await plugin.refreshRoutesAfterAtlasUpdate(result)
+      const image = await renderAtlasUpdateResult(result, plugin.e?.user_id)
+      await replyImage(plugin, image, atlasUpdateMessage(result))
+    },
+  })
+
+  if (!submission.started) {
+    const tip = submission.reason === "update_in_progress"
+      ? "[荷花插件]已有图鉴更新任务在后台执行，请等待完成通知。"
+      : `[荷花插件]图鉴更新刚执行过，请 ${Math.ceil((submission.retryAfterMs || 0) / 1000)} 秒后再试。`
+    await replyText(plugin, tip)
+    return true
+  }
+
+  const head = startText || "[荷花插件]已提交图鉴更新任务。"
+  await replyText(plugin, `${head}\n[荷花插件]已转入后台执行（${submission.taskId}），完成后会发结果图，期间不影响其它指令。`)
+  return true
+}
+
+/** 定时 / 启动入口：共用同一把锁，完成后刷新路由 + 写日志 + 私聊主人一条文本 */
+function submitAtlasTaskScheduled(plugin, { config = {}, mode = "check", label = "定时更新", startup = false } = {}) {
+  const submission = submitAtlasUpdate({
+    config,
+    mode,
+    label,
+    onDone: async result => {
+      await plugin.refreshRoutesAfterAtlasUpdate(result)
+      if (result.ok && !result.skipped) {
+        globalThis.logger?.mark?.(`[Lotus-Plugin] atlas ${result.mode || mode} completed`)
+        if (!startup) await notifyAtlasMasters(`[荷花插件]图鉴定时更新完成：${atlasUpdateMessage(result)}`)
+      } else if (!result.ok) {
+        globalThis.logger?.warn?.(`[Lotus-Plugin] atlas update failed: ${result.reason || result.message || "unknown"}`)
+      }
+    },
+  })
+  if (!submission.started) {
+    return { ok: true, skipped: true, reason: submission.reason }
+  }
+  return { ok: true, started: true, taskId: submission.taskId }
+}
+
+/** 主人文本通知：微信下 master 可能是 botWxid:ownerWxid 映射，取冒号后的 owner */
+async function notifyAtlasMasters(text) {
+  const bot = globalThis.Bot
+  const raw = bot?.config?.master || bot?.cfg?.master || []
+  const values = Array.isArray(raw) ? raw : Object.values(raw)
+  const owners = [...new Set(values.map(item => String(item).split(":").pop()).filter(Boolean))]
+  for (const owner of owners) {
+    try {
+      await notifyUser(owner, text, { prefer: "private", onlyKnownFriend: true })
+    } catch (error) {
+      globalThis.logger?.debug?.(`[Lotus-Plugin] atlas notify skipped: ${error?.message || error}`)
+    }
+  }
+}
+
+/** 结果卡数据（纯函数，便于自检）：逐游戏旧→新版本 + 条目 / 图片增减 + 「无变化」结论 */
+export function buildAtlasUpdateCardData(result) {
+  const diff = result.stats?.diff?.available ? result.stats.diff : null
+  const fallbackChanges = result.check?.diff?.changes || result.diff?.changes || []
+
+  const versionText = diff
+    ? (diff.versionChanges.length
+      ? diff.versionChanges.map(item => `${item.game} ${item.from} → ${item.to}`).join("\n")
+      : "无变化（逐游戏版本均未变）")
+    : (fallbackChanges.length
+      ? fallbackChanges.map(item => `${item.game}:${item.local?.latest || "-"} -> ${item.remote?.latest || "-"}`).join(" / ")
+      : "无")
+  const countText = pair => pair
+    ? `${formatNumber(pair.from)} → ${formatNumber(pair.to)}（${formatDelta(pair.delta)}）`
+    : "未统计"
+
+  const items = [
+    { label: "模式", value: result.skipped ? "skip" : result.mode || "-" },
+    { label: "耗时", value: formatAtlasDuration(result.durationMs) },
+  ]
+  if (!result.skipped) {
+    items.push(
+      { label: "命令", value: `${result.command || "-"} ${(result.args || []).join(" ")}`.trim() },
+      { label: "退出码", value: result.code ?? "-" },
+    )
+  }
+  items.push(
+    { label: "版本变化", value: versionText },
+    { label: "条目", value: countText(diff?.itemFiles) },
+    { label: "图片", value: countText(diff?.imageFiles) },
+  )
+  if (diff && diff.fetchedAt.from !== diff.fetchedAt.to) {
+    items.push({ label: "抓取时间", value: `${shortAtlasTime(diff.fetchedAt.from)} → ${shortAtlasTime(diff.fetchedAt.to)}` })
+  }
+  items.push(
+    { label: "变化结论", value: diff ? diff.summary : (result.skipped ? "已跳过，未改动数据" : "未统计") },
+    {
+      label: "同步",
+      value: result.sync?.sameRoot
+        ? "同目录，无需复制"
+        : result.sync?.ok
+          ? `${(result.sync.copied || []).join(" / ")} -> ${result.sync.targetRoot}`
+          : "未执行",
+    },
+  )
+  if (!result.skipped) {
+    items.push({ label: "输出", value: (result.stdout || result.stderr || "").slice(0, 80) || "无" })
+  }
+
+  return {
     title: "图鉴更新",
     subtitle: result.root || "Nanoka Atlas",
     badge: result.skipped ? "跳过" : result.ok ? "完成" : "失败",
     message: atlasUpdateSummary(result),
+    items,
+  }
+}
+
+async function renderAtlasUpdateResult(result, userId) {
+  return renderStatusCard({
+    ...buildAtlasUpdateCardData(result),
     userId,
-    items: [
-      { label: "模式", value: result.skipped ? "skip" : result.mode || "-" },
-      { label: "命令", value: `${result.command || "-"} ${(result.args || []).join(" ")}`.trim() },
-      { label: "退出码", value: result.code ?? "-" },
-      { label: "版本差异", value: changed.length ? changed.map(item => `${item.game}:${item.local?.latest || "-"} -> ${item.remote?.latest || "-"}`).join(" / ") : "无" },
-      { label: "同步", value: result.sync?.ok ? `${result.sync.copied.join(" / ")} -> ${result.sync.targetRoot}` : "未执行" },
-      { label: "输出", value: (result.stdout || result.stderr || "").slice(0, 100) || "无" },
-    ],
   }, {
     saveId: `lotus-atlas-update-${userId || "system"}`,
   })
 }
 
+function formatAtlasDuration(ms) {
+  const value = Number(ms || 0)
+  if (!Number.isFinite(value) || value <= 0) return "-"
+  if (value < 1000) return `${value} ms`
+  if (value < 60_000) return `${(value / 1000).toFixed(1)} 秒`
+  return `${Math.floor(value / 60_000)} 分 ${Math.round((value % 60_000) / 1000)} 秒`
+}
+
+function shortAtlasTime(value) {
+  const text = String(value || "")
+  if (!text || text === "-") return "-"
+  return text.replace("T", " ").replace(/\.\d+Z$/, "Z").slice(0, 19)
+}
+
 function atlasUpdateSummary(result) {
+  const diff = result.stats?.diff?.available ? result.stats.diff : null
+  const tail = diff ? (diff.changed ? `本次变化：${diff.summary}。` : "本地条目 / 图片统计也无变化。") : ""
   if (!result.ok) return `更新失败：${result.reason || "unknown"}`
   if (result.skipped) {
-    if (result.reason === "versions_unchanged") return "远端版本号未变化，已跳过增量抓取。"
+    if (result.reason === "versions_unchanged") return `远端版本号未变化，已跳过增量抓取。${tail}`
     if (result.reason === "local_data_missing") return "本地图鉴数据缺失，但配置关闭了缺失时全量拉取。"
     return `已跳过：${result.reason || "skip"}`
   }
-  if (result.mode === "initial") return "本地图鉴缺失或手动要求全量，已执行 nanoka-atlas-backend 全量抓取。"
-  return "远端版本号变化，已执行 nanoka-atlas-backend 增量抓取。"
+  if (result.mode === "initial") return `本地图鉴缺失或手动要求全量，已执行 nanoka-atlas-backend 全量抓取。${tail}`
+  return `远端版本号变化，已执行 nanoka-atlas-backend 增量抓取。${tail}`
 }
 
 function atlasUpdateMessage(result) {
+  const diff = result.stats?.diff?.available ? result.stats.diff : null
+  const tail = diff?.changed ? `（${diff.summary}）` : ""
   if (!result.ok) return "[荷花插件]图鉴更新失败。"
-  if (result.skipped) return "[荷花插件]图鉴版本未变化，已跳过更新。"
-  if (result.mode === "initial") return "[荷花插件]图鉴全量更新完成。"
-  return "[荷花插件]图鉴增量更新完成。"
+  if (result.skipped) return `[荷花插件]图鉴版本未变化，已跳过更新。${diff && !diff.changed ? "（条目 / 图片统计也无变化）" : ""}`
+  if (result.mode === "initial") return `[荷花插件]图鉴全量更新完成${tail}。`
+  return `[荷花插件]图鉴增量更新完成${tail}。`
 }
 
 function atlasFailureReply(result) {

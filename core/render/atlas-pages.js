@@ -7,33 +7,21 @@ import { resourcesPath } from '../path.js'
 import { fetchImageBytes } from './image.js'
 import { plainGameText } from './plain-text.js'
 import { encodeGpuCanvas } from './gpu-buffer.js'
-import { DARK, THEME, LIGHT_BASE, paintThemeBackground } from './theme.js'
 
 // Miao wiki/character-talent: elemental canvas, circular icon, gold headings,
 // dark talent panels. Each content category is measured and kept on one complete image.
-// 配色已接入主题真源：浅底主题（有色场 or light）下页底改走 paintThemeBackground，
-// 面板/描边/分隔线一并换用主题色；上游深底主题（dark/glass）保持原样。
 const WIDTH = 800, MARGIN = 24, INNER = WIDTH - MARGIN * 2
 const HEADER = 184, BOTTOM = 62
 const FONT = '"MiaoWiki", MiSans, sans-serif'
-const THEMED = Boolean(DARK.BG) || LIGHT_BASE      // 不用上游深色页底/元素背景图
-const GOLD = DARK.GOLD, WHITE = DARK.WHITE, MUTED = DARK.SUB_TEXT || DARK.LABEL
-const PAGE_BG = DARK.BG ? null : '#252c40'         // 上游深色页底（仅上游深底主题用）
-const HEADER_BG = THEMED ? DARK.HEADER : 'rgba(15,18,29,0.52)'
-const BLOCK_BG = THEMED ? DARK.PANEL : 'rgba(15,20,31,0.58)'
-const HEAD_TINT = THEMED ? (DARK.CELL_BG || DARK.HINT_BG || DARK.STRIPE) : 'rgba(211,188,142,0.19)'
-const RULE = THEMED ? (DARK.LINE || DARK.BORDER_IN) : 'rgba(255,255,255,0.09)'
-const ICON_BG = THEMED ? (DARK.CELL_BG || DARK.PANEL) : 'rgba(255,255,255,0.10)'
-const BORDER_IN = THEMED ? (DARK.BORDER_IN || DARK.LINE) : null
+const GOLD = '#d3bc8e', WHITE = '#f1efed', MUTED = '#c2c5cb'
 const ROOT = path.join(resourcesPath, 'miao-theme')
 const CACHE = new Map()
 let initialized = false, measureCanvas
 
 function init() {
   if (initialized) return
-  const regFont = (name, p) => { try { if (existsSync(p)) FontLibrary.use(name, [p]) } catch {} }
-  regFont('MiaoWiki', path.join(ROOT, 'fonts/HYWH-65W.ttf'))
-  regFont('MiSans', path.join(resourcesPath, 'fonts/MiSans-VF.ttf'))
+  FontLibrary.use('MiaoWiki', [path.join(ROOT, 'fonts/HYWH-65W.ttf')])
+  FontLibrary.use('MiSans', [path.join(resourcesPath, 'fonts/MiSans-VF.ttf')])
   initialized = true
 }
 function measure() { init(); measureCanvas ||= new Canvas(10, 10); return measureCanvas.getContext('2d') }
@@ -145,6 +133,31 @@ function elementOf(data) {
   if (/草/.test(elem)) return 'dendro'
   return 'sr'
 }
+function characterSkillGroups(view) {
+  const skills = view.skills || []
+  const extras = [...(view.passives || []), ...(view.enhancements || [])]
+  if (view.game === '原神') {
+    return [
+      ...skills.slice(0, 3).map((card, index) => ({ section: ['普通攻击', '元素战技', '元素爆发'][index], cards: [card] })),
+      { section: '其他天赋', cards: [...skills.slice(3), ...extras] },
+    ]
+  }
+  const definitions = view.game === '星铁' ? [
+    ['普通攻击', /普攻|普通攻击/], ['战技', /战技/], ['终结技', /终结技/],
+    ['天赋与行迹', /天赋/], ['秘技与地图攻击', /秘技|地图攻击/],
+  ] : [
+    ['普通攻击', /普通攻击/], ['特殊技', /特殊技/], ['连携技与终结技', /连携技|终结技/],
+    ['闪避与支援', /闪避|支援/], ['核心能力与潜能', /核心/],
+  ]
+  const groups = definitions.map(([section]) => ({ section, cards: [] }))
+  const extraGroup = groups[view.game === '星铁' ? 3 : 4]
+  for (const card of skills) {
+    const index = definitions.findIndex(([, pattern]) => pattern.test(card.type || ''))
+    ;(index < 0 ? extraGroup : groups[index]).cards.push(card)
+  }
+  extraGroup.cards.push(...extras)
+  return groups
+}
 function groupsOf(data) {
   const view = data.view || {}, groups = []
   const add = (section, blocks) => { if (blocks.length) groups.push({ section, blocks }) }
@@ -158,10 +171,7 @@ function groupsOf(data) {
     if (meta.length) overview.push(textBlock(meta.map(m => `${m.label}：${m.value}`).join(' · '), { color: GOLD }))
     overview.push(...factsBlocks(view.stats || []))
     add('角色总览', overview)
-    add(view.game === '星铁' ? '技能与行迹' : view.game === '绝区零' ? '技能与核心能力' : '技能与天赋', [
-      ...cardBlocks(view.skills),
-      ...cardBlocks([...(view.passives || []), ...(view.enhancements || [])]),
-    ])
+    for (const group of characterSkillGroups(view)) add(group.section, cardBlocks(group.cards))
     add(view.game === '星铁' ? '星魂' : view.game === '绝区零' ? '影画' : '命座', cardBlocks(view.constellations))
     const materialGroups = view.materialGroups?.length ? view.materialGroups : [{ title: '养成材料', items: view.materials || [] }]
     const blocks = []
@@ -174,10 +184,6 @@ function groupsOf(data) {
     add('养成材料', blocks)
   } else if (view.kind === 'weapon') {
     const blocks = [textBlock(view.description), ...factsBlocks(view.stats || []), ...cardBlocks(view.refinements || [])]
-    if (view.materials?.length) {
-      blocks.push(labelBlock('突破材料'))
-      blocks.push(...materialBlocks(view.materials))
-    }
     if (view.story) blocks.push(labelBlock('武器故事'), textBlock(view.story))
     add(view.page || '装备图鉴', blocks)
   } else if (view.kind === 'relic') {
@@ -244,19 +250,8 @@ function factsBlocks(items) {
   return blocks
 }
 function materialBlocks(items) {
-  return (items || []).map(item => {
-    const nameLines = linesOf(item.name || item.title || '', INNER - 180, 20)
-    const weekday = item.weekday || null
-    // 副本材料时间批注（周本/一四/二五/三六）：预留一行高度绘制红框批注
-    return {
-      type: 'material',
-      icon: item.icon,
-      name: nameLines,
-      count: String(item.count || ''),
-      weekday,
-      height: Math.max(86, nameLines.length * 28 + 26) + (weekday ? 30 : 0),
-    }
-  })
+  return (items || []).map(item => ({ type: 'material', icon: item.icon, name: linesOf(item.name || item.title || '', INNER - 180, 20), count: String(item.count || ''),
+    height: Math.max(86, linesOf(item.name || item.title || '', INNER - 180, 20).length * 28 + 26) }))
 }
 
 export function buildAtlasPages(data) {
@@ -300,32 +295,26 @@ export async function renderAtlasPage(data, options = {}) {
   const roots = [data.atlasRoot].filter(Boolean), missing = []
   async function image(src) { const value = await getImage(src, roots); if (src && !value) missing.push(src); return value }
   function rect(x, y, w, h, fill, radius = 12) { ctx.fillStyle = fill; ctx.beginPath(); ctx.roundRect(x, y, w, h, radius); ctx.fill() }
-  // 面板：填色 + （新主题下）1px 内描边 —— 浅底上仅靠色差分不出层级，描边是必需的
-  function panel(x, y, w, h, fill, radius = 12) { rect(x, y, w, h, fill, radius); if (BORDER_IN) { ctx.strokeStyle = BORDER_IN; ctx.lineWidth = 1; ctx.beginPath(); ctx.roundRect(x + .5, y + .5, w - 1, h - 1, radius); ctx.stroke() } }
   function textLines(lines, x, y, size = 19, color = WHITE, lineHeight = 29) {
     ctx.font = `${size}px ${FONT}`; ctx.textBaseline = 'top'; ctx.fillStyle = color; ctx.textAlign = 'left'
     lines.forEach((s, i) => ctx.fillText(s, x, y + i * lineHeight))
   }
   function contain(img, x, y, w, h) { const ratio = Math.min(w / img.width, h / img.height); const dw = img.width * ratio, dh = img.height * ratio; ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh) }
-  if (THEMED) paintThemeBackground(ctx, WIDTH, page.height)
-  else rect(0, 0, WIDTH, page.height, PAGE_BG, 0)
-  const bg = THEMED ? null : await image(path.join(ROOT, `bg/bg-${page.element || 'sr'}.webp`))
+  rect(0, 0, WIDTH, page.height, '#252c40', 0)
+  const bg = await image(path.join(ROOT, `bg/bg-${page.element || 'sr'}.webp`))
   if (bg) ctx.drawImage(bg, 0, 0, WIDTH, page.height)
-  panel(MARGIN, 12, INNER, 152, HEADER_BG, 12)
+  rect(MARGIN, 12, INNER, 152, 'rgba(15,18,29,0.52)', 12)
   const avatar = await image(data.image || data.view?.image)
   if (avatar) {
     ctx.save(); ctx.beginPath(); ctx.arc(84, 79, 51, 0, Math.PI * 2); ctx.clip(); contain(avatar, 33, 28, 102, 102); ctx.restore()
     ctx.strokeStyle = GOLD; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(84, 79, 52, 0, Math.PI * 2); ctx.stroke()
   }
-  // 没有头像时标题左移贴边 —— 否则左边会留出一个 119px 的空洞
-  const textX = avatar ? 152 : MARGIN + 20
-  const titleWidth = avatar ? 620 : INNER - 40
-  const titleLines = linesOf(data.title, titleWidth, 33)
-  textLines(titleLines, textX, 30, 33, WHITE, 39)
-  textLines([`${data.view?.game || ''} · ${page.section} · ${page.index}/${page.total}`], textX + 2, 35 + titleLines.length * 39, 18, GOLD)
-  textLines([data.view?.version ? `资料版本 ${data.view.version}` : '角色与装备资料'], textX + 2, 69 + titleLines.length * 39, 14, MUTED)
+  const titleLines = linesOf(data.title, 620, 33)
+  textLines(titleLines, 152, 30, 33, WHITE, 39)
+  textLines([`${data.view?.game || ''} · ${page.section} · ${page.index}/${page.total}`], 154, 35 + titleLines.length * 39, 18, GOLD)
+  textLines([data.view?.version ? `资料版本 ${data.view.version}` : '角色与装备资料'], 154, 69 + titleLines.length * 39, 14, MUTED)
   let y = HEADER
-  const texture = THEMED ? null : await image(path.join(ROOT, 'card-bg.png'))
+  const texture = await image(path.join(ROOT, 'card-bg.png'))
   for (const [blockIndex, block] of page.blocks.entries()) {
     if (block.type === 'gap') { y += block.height; continue }
     if (!blockIndex || page.blocks[blockIndex - 1].type === 'gap') {
@@ -333,11 +322,11 @@ export async function renderAtlasPage(data, options = {}) {
       for (const row of page.blocks.slice(blockIndex)) { if (row.type === 'gap') break; groupHeight += row.height }
       ctx.save(); ctx.beginPath(); ctx.roundRect(MARGIN, y, INNER, groupHeight, 10); ctx.clip()
     }
-    rect(MARGIN, y, INNER, block.height, BLOCK_BG, 0)
+    rect(MARGIN, y, INNER, block.height, 'rgba(15,20,31,0.58)', 0)
     if (texture && block.type === 'label') ctx.drawImage(texture, MARGIN, y, INNER, block.height)
     if (block.type === 'label') {
       const icon = block.icon ? await image(block.icon) : null
-      if (icon) { rect(40, y + 11, 62, 62, ICON_BG, 31); contain(icon, 49, y + 20, 44, 44) }
+      if (icon) { rect(40, y + 11, 62, 62, 'rgba(255,255,255,0.10)', 31); contain(icon, 49, y + 20, 44, 44) }
       const x = icon ? 122 : 44
       textLines(block.title, x, y + 14, 26, GOLD, 34)
       if (block.subtitle) textLines([block.subtitle], x, y + 19 + block.title.length * 34, 14, MUTED)
@@ -361,28 +350,13 @@ export async function renderAtlasPage(data, options = {}) {
       if (icon) contain(icon, 40, y + 11, 60, 60)
       textLines(block.name, icon ? 120 : 44, y + 24, 20)
       if (block.count) textLines([`× ${block.count}`], 654, y + 26, 21, GOLD)
-      if (block.weekday) {
-        const label = block.weekday
-        const bw = label.length * 15 + 12
-        const bx = icon ? 120 : 44, by = y + 52
-        ctx.strokeStyle = '#a63b2a'; ctx.lineWidth = 1.5
-        ctx.beginPath(); ctx.roundRect(bx, by, bw, 22, 4); ctx.stroke()
-        // textLines 用 textBaseline='top'，因此 y 传的是文字顶部：22 高的框配 14px 字 → top 偏移 4 居中
-        textLines([label], bx + 6, by + 4, 14, '#a63b2a')
-      }
     } else if (block.type.startsWith('table')) {
-      if (block.type === 'table-head') rect(24, y, INNER, block.height, HEAD_TINT, 0)
+      if (block.type === 'table-head') rect(24, y, INNER, block.height, 'rgba(211,188,142,0.19)', 0)
       let x = 44
       block.cells.forEach((cell, i) => { textLines(cell, x + 6, y + 10, 17, block.type === 'table-head' ? GOLD : WHITE, 25); x += block.widths[i] })
-      ctx.strokeStyle = RULE; ctx.beginPath(); ctx.moveTo(44, y + block.height); ctx.lineTo(756, y + block.height); ctx.stroke()
+      ctx.strokeStyle = 'rgba(255,255,255,0.09)'; ctx.beginPath(); ctx.moveTo(44, y + block.height); ctx.lineTo(756, y + block.height); ctx.stroke()
     }
     y += block.height
-    // 新主题下相邻内容块之间补一条 1px 分隔线：浅底上「白面板叠白面板」否则会连成一片
-    const nextBlock = page.blocks[blockIndex + 1]
-    if (BORDER_IN && nextBlock && nextBlock.type !== 'gap') {
-      ctx.strokeStyle = BORDER_IN; ctx.lineWidth = 1
-      ctx.beginPath(); ctx.moveTo(MARGIN + 1, y + .5); ctx.lineTo(MARGIN + INNER - 1, y + .5); ctx.stroke()
-    }
     if (!page.blocks[blockIndex + 1] || page.blocks[blockIndex + 1].type === 'gap') ctx.restore()
   }
   textLines([`荷花插件 · Nanoka Atlas · ${page.index}/${page.total}`], 24, page.height - 37, 14, MUTED)

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { normalizeProfileId } from "../../core/config/profile.js"
-import { SHOP_GAME_BIZ, isCoinShopLimited } from "./client.js"
+import { SHOP_GAME_BIZ, coinShopLimitKind, coinShopLimitMessage } from "./client.js"
 
 const ACTIVE = new Set(["scheduled", "preparing", "submitting"])
 const GAME_KEY = { hk4e_cn: "gs", hkrpg_cn: "sr", nap_cn: "zzz", bh3_cn: "bh3", nxx_cn: "nxx", bh2_cn: "bh2" }
@@ -31,6 +31,7 @@ export class CoinShopTracking {
     this.snapshots = new Map()
     this.polling = null
     this.stopped = false
+    this.paused = new Set()
   }
 
   async destinations({ qq, profileId = 1, game, itemType }) {
@@ -47,7 +48,7 @@ export class CoinShopTracking {
   }
 
   async create({ qq, profileId = 1, botId = "", mode, game, itemType, goodsIds = [], keywords = [], maxPrice, spendLimit,
-    followSameName = true, addressId = "", pollMinutes = 30, leadSeconds = 5, intervalMs = 500, afterSeconds = 20 }) {
+    followSameName = true, addressId = "", pollMinutes = 30, leadSeconds = 5, intervalMs = 500 }) {
     await this.service.initialize()
     if (!["goods", "category"].includes(mode)) throw new Error("追踪方式无效")
     if (!Array.isArray(goodsIds) || goodsIds.length > 20 || goodsIds.some(id => !/^\d+$/.test(String(id)))) throw new Error("具体商品最多选择 20 件，商品 ID 必须是数字")
@@ -55,7 +56,7 @@ export class CoinShopTracking {
     if (!Array.isArray(keywords) || keywords.length > 10 || keywords.some(word => typeof word !== "string" || word.length > 80)) throw new Error("关键词格式错误")
     const priceLimit = optionalLimit(maxPrice), totalLimit = optionalLimit(spendLimit)
     for (const limit of [priceLimit, totalLimit]) if (limit !== null && (!Number.isSafeInteger(limit) || limit < 0)) throw new Error("米游币上限应为非负整数，不填表示不限")
-    for (const [value, min, max] of [[pollMinutes, 1, 1440], [leadSeconds, 0, 30], [intervalMs, 250, 5000], [afterSeconds, 5, 60]]) {
+    for (const [value, min, max] of [[pollMinutes, 1, 1440], [leadSeconds, 0, 30], [intervalMs, 250, 5000]]) {
       if (!Number.isInteger(Number(value)) || Number(value) < min || Number(value) > max) throw new Error("轮询或连续请求参数超出允许范围")
     }
     const id = normalizeProfileId(profileId)
@@ -76,7 +77,7 @@ export class CoinShopTracking {
       keywords: keywords.map(word => word.trim()).filter(Boolean), followSameName: Boolean(followSameName), maxPrice: priceLimit, spendLimit: totalLimit,
       role: targets.type === "role" ? targets.items[0] : null, gameBiz: targets.gameBiz || "",
       addressId: address?.id || "", addressLabel: address?.label || "", pollMs: Number(pollMinutes) * 60000, pollUnit: "minutes",
-      leadMs: Number(leadSeconds) * 1000, intervalMs: Number(intervalMs), afterMs: Number(afterSeconds) * 1000,
+      leadMs: Number(leadSeconds) * 1000, intervalMs: Number(intervalMs),
       enabled: true, createdAt: this.service.now(), message: "持续追踪中，等待官方商品状态变化",
     }
     if (!rule.accountId) throw new Error("profile 缺少米游社账号 ID")
@@ -105,11 +106,15 @@ export class CoinShopTracking {
     const rule = rules.find(item => item.id === id && item.qq === String(qq))
     if (!rule) throw new Error("未找到你的追踪规则")
     if (enabled && (await this.service.store.list()).some(plan => plan.trackingId === id && plan.status === "unknown")) throw new Error("请先核对该规则下结果待确认的兑换记录")
+    // Block dispatch immediately, including while the persistent update waits
+    // behind another store write.
+    if (!enabled) this.paused.add(id)
     await this.service.store.changeTrackers(items => {
       const target = items.find(item => item.id === id && item.qq === String(qq))
       target.enabled = Boolean(enabled)
       target.message = enabled ? "持续追踪已恢复" : "追踪已暂停"
     })
+    if (enabled) this.paused.delete(id)
     this.snapshots.delete(id)
     if (!enabled) {
       for (const plan of await this.service.store.list()) if (plan.trackingId === id && ["scheduled", "preparing"].includes(plan.status)) {
@@ -123,7 +128,7 @@ export class CoinShopTracking {
     if (!plan.trackingId) return
     const rule = (await this.service.store.listTrackers()).find(item => item.id === plan.trackingId)
     this.snapshots.set(plan.trackingId, { status: "watching", nextPollAt: this.service.now() + (rule?.pollMs || 1800000), message: status === "succeeded" ? "本轮兑换成功，继续追踪后续批次与同名新商品" : message })
-    if (plan.errorKind === "verification") { await this.pauseAccount(plan.accountId, message); return }
+    if (plan.errorKind === "rate_limit") { await this.pauseAccount(plan.accountId, message); return }
     if (status === "unknown" || plan.errorKind === "binding") {
       await this.service.store.changeTrackers(rules => {
         const rule = rules.find(item => item.id === plan.trackingId)
@@ -133,6 +138,7 @@ export class CoinShopTracking {
   }
 
   async pauseAccount(account, message) {
+    for (const rule of await this.service.store.listTrackers()) if (rule.accountId === account) this.paused.add(rule.id)
     await this.service.store.changeTrackers(rules => {
       for (const rule of rules) if (rule.accountId === account) { rule.enabled = false; rule.message = message }
     })
@@ -187,14 +193,17 @@ export class CoinShopTracking {
           const { spent, held } = this.usage(rule, plans)
           if (rule.spendLimit !== null && spent + held + good.price > rule.spendLimit) { snapshot.message = "剩余追踪预算不足，等待调整预算或暂停规则"; continue }
           await service.reserve({ qq: rule.qq, profileId: rule.profileId, goodsId: good.id, uid: rule.role?.uid, addressId: rule.addressId, botId: rule.botId,
-            immediate: false, tracking: { id: rule.id, cycleKey, role: rule.role, gameBiz: rule.gameBiz, leadMs: rule.leadMs, intervalMs: rule.intervalMs, afterMs: rule.afterMs } })
+            immediate: false, tracking: { id: rule.id, cycleKey, role: rule.role, gameBiz: rule.gameBiz, leadMs: rule.leadMs, intervalMs: rule.intervalMs } })
           snapshot.status = "exchanging"
           snapshot.message = "已进入开放前连续请求阶段，成功后继续追踪后续批次"
           snapshot.nextPollAt = service.now() + 1000
         }
       } catch (error) {
         snapshot.message = error.message
-        if (isCoinShopLimited(error)) await this.pauseAccount(rule.accountId, `官方接口要求验证或限制频率，已暂停该账号的追踪：${error.message}`)
+        if (coinShopLimitKind(error) === "rate_limit") {
+          snapshot.message = `${coinShopLimitMessage(error)} 已暂停该账号的追踪，处理后可手动恢复。`
+          await this.pauseAccount(rule.accountId, snapshot.message)
+        }
         if (/绑定已变化|通行证已变化/.test(error.message)) await service.store.changeTrackers(rules => { const item = rules.find(item => item.id === rule.id); if (item) { item.enabled = false; item.message = error.message } })
       }
       this.snapshots.set(rule.id, snapshot)

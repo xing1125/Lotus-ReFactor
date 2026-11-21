@@ -1,11 +1,8 @@
 const SCHEDULE_MODES = new Set(["inherit", "random", "fixed"])
 const GLOBAL_SCHEDULE_MODES = new Set(["random", "fixed"])
 const NOTIFY_PREFERS = new Set(["private", "group"])
-const PYTHON_MODES = new Set(["venv", "system"])
 const PERMISSION_POLICIES = new Set(["allow", "deny", "inherit", "master_only"])
 const BILI_MULTI_PAGE_POLICIES = new Set(["zip", "all", "first"])
-// 与 core/render/theme.js 的 THEME_NAMES 保持一致（主题真源侧另有兜底：未知值回落 crystal）
-const THEME_NAMES = ["crystal", "mist", "saas", "ice", "aurora", "dawn", "light", "glass", "dark", "abyss", "tide"]
 
 export function validateProfile(profile) {
   const errors = []
@@ -31,6 +28,12 @@ export function validateProfile(profile) {
   validateNotify(profile.profile?.notify, errors)
   validateGames(profile.games, errors)
   validateCloudGames(profile.cloud_games, errors)
+  if (profile.auto_redeem !== undefined && (!isObject(profile.auto_redeem)
+    || typeof profile.auto_redeem.enable !== "boolean"
+    || !Array.isArray(profile.auto_redeem.games)
+    || profile.auto_redeem.games.some(game => !["gs", "sr", "zzz"].includes(game)))) {
+    errors.push("auto_redeem must contain a boolean enable and supported games")
+  }
 
   return errors
 }
@@ -54,33 +57,53 @@ export function validateGlobalConfig(config) {
     errors.push("version must be a positive integer")
   }
 
-  validateRenderConfig(config.render, errors)
-  validateModulesConfig(config.modules, errors)
-  validateRoutingConfig(config.routing, errors)
-  validateActionsConfig(config.actions, errors)
   validateGlobalScheduler(config.scheduler, errors)
   validateCaptchaConfig(config.captcha, errors)
-  validatePythonConfig(config.python, errors)
   validateToolsConfig(config.tools, errors)
   validateRemoteConfig(config.remote, errors)
   validateBilibiliConfig(config.bilibili, errors)
   validateDouyinConfig(config.douyin, errors)
   validateGroupsConfig(config.groups, errors)
   if (!isObject(config.tuneweave) || !isString(config.tuneweave.api_url) || !isPositiveInteger(config.tuneweave.request_timeout_ms)) errors.push("tuneweave requires api_url and positive request_timeout_ms")
+  if (!isPositiveInteger(config.tuneweave?.update_delay_ms) || config.tuneweave.update_delay_ms > 2147483647) errors.push("tuneweave.update_delay_ms must be a positive timer interval")
+  const music = config.music
+  if (!isObject(music) || typeof music.enable !== "boolean" || !["netease", "qq", "kugou", "kuwo", "migu", "soda"].includes(music.default_platform) || !["auto", "standard", "higher", "high", "lossless", "hires"].includes(music.quality)) errors.push("music platform, quality or switches are invalid")
+  for (const field of ["search_limit", "session_timeout_ms", "download_timeout_ms", "max_size_mb"]) if (!isPositiveInteger(music?.[field])) errors.push(`music.${field} must be a positive integer`)
+  if (music?.search_limit > 30) errors.push("music.search_limit must not exceed 30")
   validateNeteasePartnerConfig(config.netease_partner, errors)
-  validateLoggingConfig(config.logging, errors)
   validateAtlasConfig(config.atlas, errors)
   validatePermissionConfig(config.permissions, errors)
-  // 上游 1aa94b2 新增：coin_shop 配置校验（mode/host/port/path/public_url/session_hours）
   const shop = config.coin_shop
+  for (const field of ["ticket_minutes", "panel_ticket_minutes"]) {
+    if (!Number.isSafeInteger(shop?.[field]) || shop[field] < 1 || !Number.isSafeInteger(Date.now() + shop[field] * 60000)) errors.push(`coin_shop.${field} must be positive integer minutes`)
+  }
+  for (const field of ["session_hours", "panel_session_hours"]) {
+    if (!Number.isFinite(shop?.[field]) || shop[field] * 3600 < 1 || !Number.isSafeInteger(Date.now() + shop[field] * 3600000)) errors.push(`coin_shop.${field} must be positive hours of at least one second`)
+  }
   if (!isObject(shop) || typeof shop.enable !== "boolean" || !["auto", "shared", "standalone"].includes(shop.mode)
-      || typeof shop.host !== "string" || !Number.isInteger(shop.port) || shop.port < 1 || shop.port > 65535
+      || typeof shop.host !== "string" || !/^\S+$/.test(shop.host) || !Number.isInteger(shop.port) || shop.port < 1 || shop.port > 65535
       || typeof shop.path !== "string" || !/^\/[a-zA-Z0-9_/-]+$/.test(shop.path) || shop.path === "/"
-      || typeof shop.public_url !== "string" || (shop.icp_number !== undefined && typeof shop.icp_number !== "string") || !Number.isFinite(shop.session_hours) || shop.session_hours < 1 || shop.session_hours > 24) {
-    errors.push("coin_shop requires a valid mode, host, port, path, public_url and session_hours")
+      || shop.path.includes("//") || /\/panel\/?$/i.test(shop.path)
+      || (shop.icp_number !== undefined && typeof shop.icp_number !== "string")) {
+    errors.push("网页登录的运行模式、监听地址、端口、挂载路径或备案号无效；用户挂载路径不能与同级 /panel 重合")
+  }
+  if (!isWebPublicUrl(shop?.public_url)) {
+    errors.push("公网访问地址必须留空或填写完整的 HTTP(S) 地址，不可包含凭据、查询参数或片段")
   }
 
   return errors
+}
+
+function isWebPublicUrl(value) {
+  if (typeof value !== "string" || value !== value.trim()) return false
+  if (!value) return true
+  if (!/^https?:\/\//i.test(value) || /[?#]/.test(value)) return false
+  try {
+    const url = new URL(value)
+    return Boolean(url.hostname) && !url.username && !url.password
+  } catch {
+    return false
+  }
 }
 
 export function assertValidGlobalConfig(config) {
@@ -163,72 +186,6 @@ function validateCloudGames(cloud = {}, errors) {
   }
 }
 
-function validateRenderConfig(render = {}, errors) {
-  if (!isObject(render)) {
-    errors.push("render must be an object")
-    return
-  }
-  if (!isString(render.background) && !isStringArray(render.background)) {
-    errors.push("render.background must be a string or string array")
-  }
-  if (!isString(render.theme_color)) errors.push("render.theme_color must be a string")
-  if (typeof render.theme !== "undefined" && !THEME_NAMES.includes(String(render.theme))) {
-    errors.push(`render.theme must be one of: ${THEME_NAMES.join(", ")}`)
-  }
-  if (!isPositiveInteger(render.background_timeout_ms)) {
-    errors.push("render.background_timeout_ms must be a positive integer")
-  }
-}
-
-function validateModulesConfig(modules = {}, errors) {
-  if (typeof modules === "undefined" || modules === null) return
-  if (!isObject(modules)) {
-    errors.push("modules must be an object")
-    return
-  }
-  for (const [key, value] of Object.entries(modules)) {
-    if (typeof value !== "boolean") errors.push(`modules.${key} must be a boolean`)
-  }
-}
-
-// 命令路由（与其它插件抢同一个指令时，谁先接管）。
-// 缺省视为合法，只有显式写了才校验，避免旧配置在升级后校验失败。
-function validateRoutingConfig(routing, errors) {
-  if (typeof routing === "undefined" || routing === null) return
-  if (!isObject(routing)) {
-    errors.push("routing must be an object")
-    return
-  }
-  if ("query_priority" in routing && !Number.isFinite(Number(routing.query_priority))) {
-    errors.push("routing.query_priority must be a number")
-  }
-  if ("front_modules" in routing) {
-    if (!Array.isArray(routing.front_modules) || !routing.front_modules.every(isStringLike)) {
-      errors.push("routing.front_modules must be an array of module ids")
-    }
-  }
-}
-
-function validateActionsConfig(actions = {}, errors) {  if (typeof actions === "undefined" || actions === null) return
-  if (!isObject(actions)) {
-    errors.push("actions must be an object")
-    return
-  }
-  for (const [key, value] of Object.entries(actions)) {
-    // 动作开关（guoba.actions.js 注册表 id）必须是 boolean；
-    // 例外字段：command_text 字符串 / command_blacklist 数组（自定义指令支持，见 defaults.js）
-    if (key === "command_text") {
-      if (typeof value !== "string") errors.push("actions.command_text must be a string")
-      continue
-    }
-    if (key === "command_blacklist") {
-      if (!Array.isArray(value)) errors.push("actions.command_blacklist must be an array")
-      continue
-    }
-    if (typeof value !== "boolean") errors.push(`actions.${key} must be a boolean`)
-  }
-}
-
 function validateGlobalScheduler(scheduler = {}, errors) {
   if (!isObject(scheduler)) {
     errors.push("scheduler must be an object")
@@ -237,6 +194,7 @@ function validateGlobalScheduler(scheduler = {}, errors) {
   if (typeof scheduler.enable !== "boolean") errors.push("scheduler.enable must be boolean")
   if (!isString(scheduler.plan_generate_cron)) errors.push("scheduler.plan_generate_cron must be a string")
   if (!isString(scheduler.run_due_cron)) errors.push("scheduler.run_due_cron must be a string")
+  if (typeof scheduler.catch_up_cron !== "string" || !scheduler.catch_up_cron.trim()) errors.push("scheduler.catch_up_cron must be a non-empty string")
   if (!GLOBAL_SCHEDULE_MODES.has(scheduler.mode)) {
     errors.push("scheduler.mode must be random/fixed")
   }
@@ -266,24 +224,6 @@ function validateGlobalScheduler(scheduler = {}, errors) {
     }
     if (typeof scheduler.late_registration.notify !== "boolean") {
       errors.push("scheduler.late_registration.notify must be boolean")
-    }
-  }
-
-  // 自动补签：宽松校验，缺省合法（缺省时走 defaults / 代码内默认值）
-  if (typeof scheduler.auto_resign !== "undefined") {
-    if (!isObject(scheduler.auto_resign)) {
-      errors.push("scheduler.auto_resign must be an object")
-    } else {
-      if (typeof scheduler.auto_resign.enable !== "boolean") {
-        errors.push("scheduler.auto_resign.enable must be boolean")
-      }
-      if (!isString(scheduler.auto_resign.cron)) {
-        errors.push("scheduler.auto_resign.cron must be a string")
-      }
-      if (typeof scheduler.auto_resign.notify_on_success !== "undefined"
-        && typeof scheduler.auto_resign.notify_on_success !== "boolean") {
-        errors.push("scheduler.auto_resign.notify_on_success must be boolean")
-      }
     }
   }
 }
@@ -333,8 +273,6 @@ function validateCaptchaConfig(captcha = {}, errors) {
 
   validateProvider(captcha.test_nine, "captcha.test_nine", errors, [
     "endpoint",
-    "submodule_path",
-    "venv_path",
     "model_dir",
     "model_repo",
   ])
@@ -342,36 +280,17 @@ function validateCaptchaConfig(captcha = {}, errors) {
     if (!Array.isArray(captcha.test_nine.model_files) || !captcha.test_nine.model_files.every(isString)) {
       errors.push("captcha.test_nine.model_files must be an array of strings")
     }
-    for (const field of ["auto_start", "install_requirements", "download_models"]) {
-      if (typeof captcha.test_nine[field] !== "boolean") {
-        errors.push(`captcha.test_nine.${field} must be boolean`)
-      }
-    }
   }
   validateProvider(captcha.ttocr, "captcha.ttocr", errors, ["api", "resapi", "key", "query"])
+  if (isObject(captcha.ttocr) && "itemid_v4" in captcha.ttocr && !isPositiveInteger(captcha.ttocr.itemid_v4)) {
+    errors.push("captcha.ttocr.itemid_v4 must be a positive integer")
+  }
   if (isObject(captcha.ttocr) && Number(captcha.ttocr.poll_interval_ms) < 1000) {
     errors.push("captcha.ttocr.poll_interval_ms must be at least 1000")
   }
-  validateProvider(captcha.gtmanual, "captcha.gtmanual", errors, ["address", "verify_addr"])
+  validateProvider(captcha.gtmanual, "captcha.gtmanual", errors, ["verify_addr"])
+  if (typeof captcha.gtmanual?.internal_enable !== "boolean") errors.push("captcha.gtmanual.internal_enable must be a boolean")
   validateProvider(captcha.vision_ai, "captcha.vision_ai", errors, ["api", "key"])
-  validateLuluPlaoProvider(captcha.lulu_plao, errors)
-}
-
-function validateLuluPlaoProvider(provider = {}, errors) {
-  if (!isObject(provider)) {
-    errors.push("captcha.lulu_plao must be an object")
-    return
-  }
-  if (typeof provider.enable !== "boolean") errors.push("captcha.lulu_plao.enable must be boolean")
-  if (!["lulu", "plao"].includes(provider.provider)) {
-    errors.push("captcha.lulu_plao.provider must be lulu/plao")
-  }
-  for (const field of ["lulu_url", "lulu_token", "plao_url", "plao_token"]) {
-    if (!isString(provider[field])) errors.push(`captcha.lulu_plao.${field} must be a string`)
-  }
-  if ("timeout_ms" in provider && !isPositiveInteger(provider.timeout_ms)) {
-    errors.push("captcha.lulu_plao.timeout_ms must be a positive integer")
-  }
 }
 
 function validateProvider(provider = {}, prefix, errors, stringFields = []) {
@@ -391,22 +310,12 @@ function validateProvider(provider = {}, prefix, errors, stringFields = []) {
   }
 }
 
-function validatePythonConfig(python = {}, errors) {
-  if (!isObject(python)) {
-    errors.push("python must be an object")
-    return
-  }
-  if (!PYTHON_MODES.has(python.mode)) errors.push("python.mode must be venv/system")
-  if (!isString(python.venv_path)) errors.push("python.venv_path must be a string")
-  if (!isString(python.system_python)) errors.push("python.system_python must be a string")
-}
 
 function validateToolsConfig(tools = {}, errors) {
   if (!isObject(tools)) {
     errors.push("tools must be an object")
     return
   }
-  if (typeof tools.auto_install !== "boolean") errors.push("tools.auto_install must be boolean")
   for (const field of ["dir", "bin_dir", "github_api"]) {
     if (!isString(tools[field])) errors.push(`tools.${field} must be a string`)
   }
@@ -414,7 +323,7 @@ function validateToolsConfig(tools = {}, errors) {
   if ("download_retries" in tools && !isPositiveInteger(tools.download_retries)) {
     errors.push("tools.download_retries must be a positive integer")
   }
-  for (const name of ["bbdown", "ffmpeg", "aria2"]) {
+  for (const name of ["ffmpeg"]) {
     validateToolConfig(tools[name], `tools.${name}`, errors)
   }
 }
@@ -424,7 +333,6 @@ function validateToolConfig(tool = {}, prefix, errors) {
     errors.push(`${prefix} must be an object`)
     return
   }
-  if (typeof tool.enable !== "boolean") errors.push(`${prefix}.enable must be boolean`)
   for (const field of ["repo", "command"]) {
     if (!isString(tool[field])) errors.push(`${prefix}.${field} must be a string`)
   }
@@ -455,15 +363,13 @@ function validateBilibiliConfig(bilibili = {}, errors) {
     errors.push("bilibili must be an object")
     return
   }
-  if (!isString(bilibili.cookie)) errors.push("bilibili.cookie must be a string")
-  if (!isString(bilibili.sessdata)) errors.push("bilibili.sessdata must be a string")
   if (!isPositiveInteger(bilibili.search_limit)) errors.push("bilibili.search_limit must be a positive integer")
 
   if (!isObject(bilibili.download)) {
     errors.push("bilibili.download must be an object")
     return
   }
-  for (const field of ["enable", "use_aria2"]) {
+  for (const field of ["enable"]) {
     if (typeof bilibili.download[field] !== "boolean") {
       errors.push(`bilibili.download.${field} must be boolean`)
     }
@@ -489,27 +395,7 @@ function validateBilibiliConfig(bilibili = {}, errors) {
   if (!BILI_MULTI_PAGE_POLICIES.has(bilibili.download.multi_page_policy)) {
     errors.push("bilibili.download.multi_page_policy must be zip/all/first")
   }
-  if (!Array.isArray(bilibili.download.extra_args) || !bilibili.download.extra_args.every(isString)) {
-    errors.push("bilibili.download.extra_args must be an array of strings")
-  }
-  // 大文件中转：宽松校验，缺省合法
-  if (typeof bilibili.download.video_relay !== "undefined") {
-    if (!isObject(bilibili.download.video_relay)) {
-      errors.push("bilibili.download.video_relay must be an object")
-    } else {
-      if (typeof bilibili.download.video_relay.enable !== "boolean") {
-        errors.push("bilibili.download.video_relay.enable must be boolean")
-      }
-      if (typeof bilibili.download.video_relay.ttl_hours !== "undefined"
-        && !(typeof bilibili.download.video_relay.ttl_hours === "number" && bilibili.download.video_relay.ttl_hours >= 0)) {
-        errors.push("bilibili.download.video_relay.ttl_hours must be a non-negative number (hours)")
-      }
-      if (typeof bilibili.download.video_relay.max_total_size_mb !== "undefined"
-        && !isNonNegativeInteger(bilibili.download.video_relay.max_total_size_mb)) {
-        errors.push("bilibili.download.video_relay.max_total_size_mb must be a non-negative integer")
-      }
-    }
-  }
+  if (!isPositiveInteger(bilibili.download.concurrency) || bilibili.download.concurrency > 16) errors.push("bilibili.download.concurrency must be 1–16")
 }
 
 function validateDouyinConfig(config = {}, errors) {
@@ -574,15 +460,26 @@ function validateNeteasePartnerConfig(netease = {}, errors) {
   if (!Array.isArray(netease.comments) || !netease.comments.every(isString)) {
     errors.push("netease_partner.comments must be an array of strings")
   }
-}
-
-function validateLoggingConfig(logging = {}, errors) {
-  if (!isObject(logging)) {
-    errors.push("logging must be an object")
+  const review = netease.review
+  if (!isObject(review)) {
+    errors.push("netease_partner.review must be an object")
     return
   }
-  if (!isPositiveInteger(logging.retention_days)) errors.push("logging.retention_days must be a positive integer")
-  if (typeof logging.redact_sensitive !== "boolean") errors.push("logging.redact_sensitive must be boolean")
+  if (!["fixed", "responses", "codex"].includes(review.mode)) errors.push("netease_partner.review.mode must be fixed, responses or codex")
+  if (!Number.isInteger(review.max_chars) || review.max_chars < 20 || review.max_chars > 500) {
+    errors.push("netease_partner.review.max_chars must be an integer from 20 to 500")
+  }
+  if (!isPositiveInteger(review.timeout_ms)) errors.push("netease_partner.review.timeout_ms must be a positive integer")
+  for (const field of ["codex_command", "model", "api_url", "api_key"]) {
+    if (!isString(review[field])) errors.push(`netease_partner.review.${field} must be a string`)
+  }
+  if (review.mode === "codex" && !String(review.codex_command || "").trim()) errors.push("netease_partner.review.codex_command is required in codex mode")
+  try {
+    const url = new URL(review.api_url)
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new Error("invalid URL")
+  } catch {
+    errors.push("netease_partner.review.api_url must be an HTTP(S) URL without credentials")
+  }
 }
 
 function validateAtlasConfig(atlas = {}, errors) {

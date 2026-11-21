@@ -251,22 +251,46 @@ export async function checkTrackedSubmoduleRemoteUpdates(options = {}) {
 }
 
 async function notifySubmoduleUpdates(updates, config = {}) {
-  const masters = collectMasterIds(config)
-  if (!masters.length) return
+  // 只通知主人（master 映射里的人），不广播给其它 master / 管理员
+  const owners = collectOwnerIds(config)
+  if (!owners.length) return
   const lines = updates.map(item => `- ${item.path}: 落后 ${item.behind} 个提交（当前 ${item.head}）`)
   const message = `[荷花插件]开机检测发现子仓库未同步：\n${lines.join("\n")}\n请手动更新并检查主项目引用的 commit。`
-  for (const master of masters) {
-    await notifyUser(master, message, { prefer: "private", onlyKnownFriend: false }).catch(error => {
-      globalThis.logger?.warn?.(`[Lotus-Plugin] submodule update notification failed: ${error.message}`)
-    })
+  for (const owner of owners) {
+    // onlyKnownFriend:true → 非好友主人直接跳过，不再出现红叹号发送失败
+    const result = await notifyUser(owner, message, { prefer: "private", onlyKnownFriend: true }).catch(error => ({ ok: false, reason: error.message }))
+    if (result && result.ok !== true && result.reason && result.reason !== "not_friend") {
+      globalThis.logger?.warn?.(`[Lotus-Plugin] submodule update notification failed: ${result.reason}`)
+    }
   }
 }
 
-function collectMasterIds(config = {}) {
-  const values = [config.masterQQ, config.master, config.master_qq, config.masters]
+// 只取主人（other.yaml 的 master 映射：`botWxid:ownerWxid` 取冒号后的 owner；纯 wxid/QQ 直接取）
+function collectOwnerIds(config = {}) {
   const runtime = globalThis.Bot?.config || globalThis.Bot?.cfg || {}
-  values.push(runtime.masterQQ, runtime.master, runtime.master_qq)
-  return [...new Set(values.flatMap(value => Array.isArray(value) ? value : [value]).map(String).filter(Boolean))]
+  const raw = [
+    ...(Array.isArray(config.master) ? config.master : []),
+    ...(Array.isArray(runtime.master) ? runtime.master : []),
+  ]
+  const owners = []
+  for (const entry of raw) {
+    const str = String(entry ?? "").trim()
+    if (!str || str === "stdin") continue
+    const colon = str.indexOf(":")
+    owners.push(colon >= 0 ? str.slice(colon + 1).trim() : str)
+  }
+  // 兜底：master 映射为空时退回 masterQQ 里的主人（排除 stdin 占位符）
+  if (!owners.length) {
+    const qqRaw = [
+      ...(Array.isArray(config.masterQQ) ? config.masterQQ : []),
+      ...(Array.isArray(runtime.masterQQ) ? runtime.masterQQ : []),
+    ]
+    for (const entry of qqRaw) {
+      const str = String(entry ?? "").trim()
+      if (str && str !== "stdin") owners.push(str)
+    }
+  }
+  return [...new Set(owners.filter(Boolean))]
 }
 
 function pathJoin(base, child) {
@@ -352,6 +376,94 @@ function isIgnoredDirtyStatus(line = "") {
   if (file === "test_nine" && /[m?]/.test(code)) return true
   if (file.startsWith("test_nine/") && code.includes("?")) return true
   return false
+}
+
+/**
+ * 子模块隔离同步（启动路径专用）
+ *
+ * 借鉴 AxiuCN/Atlas-Plugin「按 gitlink 逐个同步、失败不影响其它模块」的思路，独立实现。
+ * 原 syncTrackedSubmodules 对全部子模块一次性执行 `submodule update --init --recursive`：
+ * 只要有一个子仓库损坏（本机 MihoyoBBSTools 就处于这种状态），整条命令失败，
+ * 连本来正常的 nanoka-atlas-backend 也得不到单独处理，启动日志只剩一句
+ * 「子模块提交不匹配，但自动更新失败」。
+ *
+ * 这里改为：读一次 status → 只对 + / - / U 的条目逐个 `submodule update --init <path>`，
+ * 每个结果独立记录；不带 --recursive，不触碰子模块内的 data/。
+ */
+export async function syncSubmodulesIsolated(options = {}) {
+  const {
+    cwd = rootPath,
+    outputLimit = DEFAULT_OUTPUT_LIMIT,
+    runner = runGit,
+  } = options
+
+  const status = await runner(["submodule", "status"], { cwd, outputLimit, allowFailure: true })
+  if (status.code !== 0) {
+    return {
+      ok: false,
+      action: "submodule_status_failed",
+      synced: [],
+      failed: [],
+      results: [],
+      message: "无法读取子模块状态。",
+      detail: (status.stderr || status.stdout || "").trim().slice(0, 300),
+    }
+  }
+
+  // splitLines 会 trim 行首空白，所以「已同步」行以 hash 开头；+/-/U 前缀仍保留
+  const entries = []
+  for (const line of splitLines(status.stdout)) {
+    const match = line.match(/^([+\-U]?)([0-9a-fA-F]{7,40})\s+(\S+)/)
+    if (!match) continue
+    entries.push({ state: match[1] || " ", hash: match[2], path: match[3] })
+  }
+  const pending = entries.filter(entry => entry.state !== " ")
+  if (!pending.length) {
+    return {
+      ok: true,
+      action: "submodules_up_to_date",
+      synced: [],
+      failed: [],
+      results: [],
+      message: "子模块提交已同步。",
+    }
+  }
+
+  const synced = []
+  const failed = []
+  const results = []
+  for (const entry of pending) {
+    let update
+    try {
+      update = await runner(["submodule", "update", "--init", entry.path], {
+        cwd,
+        outputLimit,
+        allowFailure: true,
+      })
+    } catch (error) {
+      update = { code: -1, stdout: "", stderr: error?.message || String(error) }
+    }
+    const ok = update.code === 0
+    results.push({
+      path: entry.path,
+      state: entry.state,
+      ok,
+      detail: (update.stderr || update.stdout || "").trim().slice(0, 200),
+    })
+    if (ok) synced.push(entry.path)
+    else failed.push(entry.path)
+  }
+
+  return {
+    ok: failed.length === 0,
+    action: failed.length ? "submodules_partial" : "submodules_updated",
+    synced,
+    failed,
+    results,
+    message: failed.length
+      ? `已同步 ${synced.length}/${pending.length} 个子模块；失败：${failed.join(", ")}（不影响其它模块，下次启动重试）`
+      : `已同步 ${synced.length} 个子模块。`,
+  }
 }
 
 function appendLimited(current, chunk, limit) {

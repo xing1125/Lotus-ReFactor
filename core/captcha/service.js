@@ -3,8 +3,7 @@ import { gtManualProvider } from "./providers/gtManual.js"
 import { testNineProvider } from "./providers/testNine.js"
 import { ttocrProvider } from "./providers/ttocr.js"
 import { visionAiProvider } from "./providers/visionAi.js"
-import { luluPlaoProvider } from "./providers/luluPlao.js"
-import { captchaFail, normalizeCaptchaChallenge } from "./result.js"
+import { captchaFail, normalizeCaptchaChallenge, normalizeCaptchaSolution } from "./result.js"
 import { emitCaptchaEvent } from "./events.js"
 
 const PROVIDERS = {
@@ -17,17 +16,17 @@ const PROVIDERS = {
   vision_ai: visionAiProvider,
   visionai: visionAiProvider,
   "vision-ai": visionAiProvider,
-  lulu_plao: luluPlaoProvider,
-  luluplao: luluPlaoProvider,
-  "lulu-plao": luluPlaoProvider,
-  lulu: luluPlaoProvider,
-  plao: luluPlaoProvider,
 }
 
-// 连续失败退避阶梯（毫秒）：第 1 次失败不等待，之后依次 1.5s / 3s / 3s…
-// 目的是不把米游社的 createVerification 打成每秒一次。
-const RETRY_BACKOFF_STEPS_MS = [1500, 3000, 3000]
-const RETRY_BACKOFF_CAP_MS = 10000
+// 这些失败都发生在「验证结果还没提交给业务方」之前，challenge 仍然可用，
+// 换方案重试同一个 challenge 是安全且有效的（尤其打码服务偶发识别失败时）。
+// 反例（默认视为已消耗）：duration_short / challenge_used / solution_already_used /
+// business_captcha_rejected —— 这些意味着结果已经交上去被拒了。
+const NON_CONSUMPTIVE_FAILURES = new Set([
+  "no_validate",
+  "timeout",
+  "request_failed",
+])
 
 export class CaptchaService {
   constructor(config = {}) {
@@ -46,13 +45,16 @@ export class CaptchaService {
     }
 
     const attempts = []
-    const order = this.providerOrder()
+    const order = this.providerOrder(context)
     const providerAttempts = this.providerAttemptLimit(context)
     const chainAttempts = this.chainAttemptLimit(context)
     let refreshAttempts = 0
     let challengeUsed = false
+    const consumedChallenges = new Set()
+    const consumedV4Lots = new Set()
+    const submittedV3Challenges = new Set()
+    const submittedV3Proofs = new Set()
     let lastFailure = null
-    let failureCount = 0
     const maxRefreshAttempts = this.maxChallengeRefreshAttempts(context, {
       order,
       providerAttempts,
@@ -64,7 +66,7 @@ export class CaptchaService {
       providers: order,
     })
 
-    for (let chainAttempt = 1; chainAttempt <= chainAttempts; chainAttempt += 1) {
+    chains: for (let chainAttempt = 1; chainAttempt <= chainAttempts; chainAttempt += 1) {
       for (let providerIndex = 0; providerIndex < order.length; providerIndex += 1) {
         const providerName = order[providerIndex]
         const provider = PROVIDERS[providerName]
@@ -80,10 +82,24 @@ export class CaptchaService {
           continue
         }
 
+        // A consumed challenge must be refreshed before selecting by version:
+        // the business may switch Geetest generations on that fresh request.
+        if (!challengeUsed && !(provider.supportedVersions || [3]).includes(challenge.captchaVersion)) {
+          const skipped = captchaFail(provider.name, "unsupported_captcha_version", { skipped: true, retryable: false })
+          attempts.push(skipped)
+          await emitCaptchaEvent(context, { type: "captcha:provider-skip", provider: provider.name, reason: skipped.reason, captchaVersion: challenge.captchaVersion, nextProvider })
+          continue
+        }
         const providerConfig = this.providerConfig(providerName, provider.name)
         const attemptLimit = this.providerAttemptLimit(context, provider.name)
         for (let providerAttempt = 1; providerAttempt <= attemptLimit; providerAttempt += 1) {
+          context.signal?.throwIfAborted()
           if (challengeUsed) {
+            if (typeof context.refreshChallenge !== "function") {
+              lastFailure = captchaFail("challenge_refresh", "challenge_refresh_unavailable", { retryable: false })
+              attempts.push(lastFailure)
+              break chains
+            }
             if (refreshAttempts >= maxRefreshAttempts) {
               lastFailure = captchaFail("challenge_refresh", "refresh_limit_exceeded", {
                 fatal: false,
@@ -101,8 +117,14 @@ export class CaptchaService {
                   : "provider_switch",
             }, attempts, context)
             if (refreshed) {
+              if (refreshed.captchaVersion === 3 && consumedChallenges.has(challengeKey(refreshed))) {
+                lastFailure = captchaFail("challenge_refresh", "challenge_not_refreshed", { retryable: false })
+                attempts.push(lastFailure)
+                break chains
+              }
               challenge = refreshed
               refreshAttempts += 1
+              challengeUsed = false
             } else if (typeof context.refreshChallenge === "function") {
               lastFailure = captchaFail("challenge_refresh", "refresh_failed", {
                 fatal: false,
@@ -113,14 +135,69 @@ export class CaptchaService {
             }
           }
 
+          if (!(provider.supportedVersions || [3]).includes(challenge.captchaVersion)) {
+            const skipped = captchaFail(provider.name, "unsupported_captcha_version", { skipped: true, retryable: false })
+            attempts.push(skipped)
+            await emitCaptchaEvent(context, { type: "captcha:provider-skip", provider: provider.name, reason: skipped.reason, captchaVersion: challenge.captchaVersion, nextProvider })
+            break
+          }
           challengeUsed = true
+          if (challenge.captchaVersion === 3) consumedChallenges.add(challengeKey(challenge))
           await emitCaptchaEvent(context, {
             type: "captcha:provider-start",
             provider: provider.name,
             attempt: providerAttempt,
             chainAttempt,
           })
-          const result = await provider.solve(challenge, providerConfig, context)
+          let result = await provider.solve(challenge, providerConfig, context)
+          context.signal?.throwIfAborted()
+          if (result.skipped) {
+            challengeUsed = false
+            consumedChallenges.delete(challengeKey(challenge))
+          }
+          if (result.ok) {
+            try { result = normalizeCaptchaSolution(result, challenge) } catch (error) {
+              result = captchaFail(provider.name, error.message, { retryable: true, challengeRefresh: true, costMs: result.costMs, raw: result.raw })
+            }
+          }
+          if (result.ok && result.captchaVersion === 4) {
+            // lotNumber identifies a single verification event, regardless of
+            // changes to its proof fields. captchaId only identifies the site.
+            const key = JSON.stringify([result.captchaId, result.lotNumber])
+            if (consumedV4Lots.has(key)) result = captchaFail(provider.name, "solution_already_used", { retryable: true, challengeRefresh: true })
+            else consumedV4Lots.add(key)
+          }
+          if (result.ok && challenge.captchaVersion === 3 && result.captchaVersion !== 4) {
+            const actualChallenge = result.challenge || challenge.challenge
+            const validate = result.validate || result.token
+            if (typeof actualChallenge !== "string" || !actualChallenge || typeof validate !== "string" || !validate) {
+              result = captchaFail(provider.name, "invalid_v3_result", { retryable: true, challengeRefresh: true })
+            } else if (submittedV3Challenges.has(actualChallenge) || submittedV3Proofs.has(validate)) {
+              result = captchaFail(provider.name, "solution_already_used", { retryable: true, challengeRefresh: true })
+            } else {
+              // SDKs may legitimately update challenge. Consume the actual
+              // returned challenge and proof before business verification, even
+              // when that verification rejects the result.
+              submittedV3Challenges.add(actualChallenge)
+              submittedV3Proofs.add(validate)
+              consumedChallenges.add(challengeKey({ ...challenge, challenge: actualChallenge }))
+            }
+          }
+          if (result.ok && typeof context.verifyResult === "function") {
+            // A Geetest token is provisional until the calling business accepts it.
+            // Exceptions abort the operation; only explicit captcha rejections retry.
+            const verification = await context.verifyResult(result, challenge)
+            if (verification?.ok) result = { ...result, verification }
+            else result = {
+              ...captchaFail(provider.name, verification?.reason || "business_captcha_rejected", {
+                retryable: verification?.retryable ?? true,
+                challengeRefresh: verification?.challengeRefresh ?? true,
+                costMs: result.costMs,
+                raw: result.raw,
+              }),
+              verification,
+            }
+          }
           attempts.push(result)
 
           if (result.ok) {
@@ -140,6 +217,7 @@ export class CaptchaService {
             type: result.skipped ? "captcha:provider-skip" : "captcha:provider-fail",
             provider: result.provider || provider.name,
             reason: result.reason,
+            code: typeof result.code === "number" && Number.isFinite(result.code) ? result.code : undefined,
             retryable: result.retryable,
             fatal: result.fatal,
             challengeRefresh: result.challengeRefresh,
@@ -148,39 +226,25 @@ export class CaptchaService {
             nextProvider: providerAttempt < attemptLimit ? provider.name : nextProvider,
           })
 
+          // 有些失败根本没把验证结果交给业务方（打码服务没返回 validate、请求超时、
+          // 连接失败），challenge 并没有被消耗。如果此时调用方又给不出 refreshChallenge，
+          // 下一轮就会直接 challenge_refresh_unavailable 打断整条链 —— 等于把
+          // provider_attempts × chain_attempts 的预算全部作废（线上签到每轮只打 1 次）。
+          // 只在「无法刷新」的场景下把 challenge 标记回可用，能刷新的调用方行为不变。
+          if (NON_CONSUMPTIVE_FAILURES.has(result.reason)
+            && typeof context.refreshChallenge !== "function") {
+            challengeUsed = false
+            consumedChallenges.delete(challengeKey(challenge))
+          }
+
           if (result.fatal) {
-            await emitCaptchaEvent(context, {
-              type: "captcha:fail",
-              provider: result.provider,
-              reason: result.reason,
-              manualLink: findManualLink(attempts),
-              attempts,
-            })
-            return {
-              ...result,
-              attempts,
-            }
+            // Invalid API credentials or exhausted balance stop this provider,
+            // while local/manual alternatives remain available.
+            break
           }
 
           if (result.skipped) break
           if (result.retryable === false && !result.challengeRefresh) break
-
-          // 同一 provider 的连续重试要退避：否则失败→refresh→再失败会以
-          // 每秒一次的节奏刷 createVerification（每轮都要向米游社申请新验证码）。
-          // 阶梯按「全局失败次数」算，这样跨链重跑、跨方案切换也不会瞬间连打。
-          failureCount += 1
-          const hasMoreAttempts = providerAttempt < attemptLimit || chainAttempt < chainAttempts
-          const backoffMs = hasMoreAttempts ? this.retryBackoffMs(failureCount) : 0
-          if (backoffMs > 0) {
-            await emitCaptchaEvent(context, {
-              type: "captcha:retry-backoff",
-              provider: provider.name,
-              attempt: providerAttempt,
-              failureCount,
-              delayMs: backoffMs,
-            })
-            await sleep(backoffMs)
-          }
         }
       }
     }
@@ -196,14 +260,16 @@ export class CaptchaService {
       type: "captcha:fail",
       provider: failed.provider,
       reason: failed.reason,
-      manualLink: findManualLink(attempts),
       attempts,
     })
     return failed
   }
 
-  providerOrder() {
-    const configured = this.config.providers || ["test_nine", "ttocr", "gtmanual"]
+  providerOrder(context = {}) {
+    // Business callers may restrict this attempt to unattended providers.
+    // Provider configuration (including enable/key) remains authoritative.
+    const configured = context.providerOrder ?? this.config.providers ?? ["test_nine", "ttocr", "gtmanual"]
+    if (!Array.isArray(configured)) throw new Error("captcha providerOrder must be an array")
     return configured.map(name => normalizeProviderName(name)).filter(Boolean)
   }
 
@@ -225,23 +291,7 @@ export class CaptchaService {
         * Number(retryPlan.providerAttempts || this.providerAttemptLimit(context) || 1)
         * Number(retryPlan.chainAttempts || this.chainAttemptLimit(context) || 1),
     )
-    // 显式配置优先。过去写成 Math.max(configured, derived)，会把配置值永久抬到
-    // derived（默认 3×3×2 = 18），导致想调小根本调不动 —— 风控期一次失败就会
-    // 以约 1 秒一次的节奏连续刷米游社 createVerification，反过来加重风控。
-    const configured = Number(this.config.refresh?.max_attempts)
-    return Math.max(0, Number.isFinite(configured) ? configured : derived)
-  }
-
-  // 连续失败后的退避。首次失败立即重试（正常场景耗时不变），
-  // 从第二次起等待，避免瞬间打满米游社的验证码申请接口。
-  retryBackoffMs(providerAttempt = 1) {
-    if (providerAttempt <= 1) return 0
-    const configured = Number(this.config.retry?.backoff_ms)
-    if (Number.isFinite(configured)) {
-      return Math.max(0, Math.min(configured * (providerAttempt - 1), RETRY_BACKOFF_CAP_MS))
-    }
-    const step = providerAttempt - 2
-    return RETRY_BACKOFF_STEPS_MS[Math.min(step, RETRY_BACKOFF_STEPS_MS.length - 1)]
+    return Math.max(0, Number(this.config.refresh?.max_attempts ?? derived), derived)
   }
 
   async refreshChallenge(challenge, result, attempts, context) {
@@ -316,11 +366,8 @@ function normalizeProviderName(name) {
   return String(name || "").trim().toLowerCase().replace(/\s+/g, "_")
 }
 
-function sleep(ms) {
-  return new Promise(resolve => {
-    const timer = setTimeout(resolve, ms)
-    if (typeof timer.unref === "function") timer.unref()
-  })
+function challengeKey(challenge) {
+  return JSON.stringify([challenge.gt, challenge.challenge])
 }
 
 function nextProviderName(order, currentIndex) {

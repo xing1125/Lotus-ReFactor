@@ -1,14 +1,15 @@
+import { normalizeZzzPrefix } from "../core/intercept/game-prefix.js"
+import { createRequestCaptchaReporter } from "../core/captcha/notify.js"
 const BasePlugin = globalThis.plugin
-import { accountDisplay } from "../services/checkin/account.js"
 
 import { PERSONAL_QUERY_RULES } from "../core/intercept/personal-query.js"
-import { resolvePriority } from "../core/intercept/priority.js"
+import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
 import {
   isMissingProfileError,
   loadProfile,
   profileLoginRequiredMessage,
 } from "../core/config/profile.js"
-import { AccountService } from "../core/login/account.js"
+import { refreshAccountAndSync, isAccountChangedError } from "../core/login/refresh.js"
 import { renderStatusCard, renderTemplate } from "../core/render/service.js"
 import { replyImage, replyText } from "../core/transport/reply.js"
 import { splitProfileSuffix } from "../services/pluginBridge/common.js"
@@ -22,18 +23,20 @@ export class LotusProfileQuery extends BasePlugin {
       name: "[Lotus-Plugin] Profile Query",
       dsc: "Lotus profile aware personal UID queries",
       event: "message",
-      priority: resolvePriority("profile_query"),
-      // 转接型规则：本质是把命令转给喵喵/ZZZ 等外部插件执行。
-      // log:false（原始标记）让 index.js 的模块开关 gate 在「委派个人查询」被锅巴关闭时
-      // 静默放行——命令完整归外部插件处理，不再补「功能已在锅巴中关闭」提示。
-      // （运行时 silencePluginLogs 本就会把 log 统一置 false，这里只影响 gate 的显式性判定）
-      rule: PERSONAL_QUERY_RULES.map(rule => ({ ...rule, log: false })),
+      priority: LOTUS_INTERCEPT_PRIORITY,
+      rule: PERSONAL_QUERY_RULES.map(rule => ({ ...rule })),
     })
     this.miao = options.miao || new MiaoProfileQueryBridge(options)
     this.zzz = options.zzz || new ZzzProfileQueryBridge(options)
     this.starRail = options.starRail || new StarRailChallengeService(options)
   }
 
+  async miaoRefreshTalent() { return this.runMiao("refreshTalent") }
+  async miaoReloadProfile() { return this.runMiao("reloadProfile") }
+  async miaoDeleteProfile() { return this.runMiao("deleteProfile") }
+  async miaoArtisList() { return this.runMiao("artisList") }
+  async miaoGroupRank() { return this.runMiao("groupRank") }
+  async zzzGachaView() { return this.runZzz("gachaLog") }
   async miaoProfileList() { return this.runMiao("profileList") }
   async miaoProfileDetail() { return this.runMiao("profileDetail") }
   async miaoProfileStat() { return this.runMiao("profileStat") }
@@ -60,7 +63,7 @@ export class LotusProfileQuery extends BasePlugin {
   async zzzExplorationDetail() { return this.runZzz("explorationDetail") }
   async zzzRank() {
     const parsed = splitProfileSuffix(this.e.msg)
-    const text = parsed.message.replace(/^(?:[%％](?:zzz|绝区零)?|[#/](?:zzz|绝区零)|(?:zzz|绝区零))/i, "").trim()
+    const text = normalizeZzzPrefix(parsed.message, "").trim()
     // 默认“排名”是纯面板分；明确写“综合榜”才使用加权分。
     // 兼容“面板/圣遗物/驱动盘”别名，并从角色名中剥离关键词。
     const character = text
@@ -78,7 +81,7 @@ export class LotusProfileQuery extends BasePlugin {
   async runMiao(method, fixedGame = "") {
     const parsed = splitProfileSuffix(this.e.msg)
     const userId = String(this.e.user_id)
-    const game = fixedGame || miaoGameFromMessage(parsed.message)
+    const game = fixedGame || (method === "artisList" && /遗器/.test(parsed.message) ? "sr" : miaoGameFromMessage(parsed.message))
     return this.runProfileQuery({
       userId,
       profileId: parsed.profileId,
@@ -117,6 +120,7 @@ export class LotusProfileQuery extends BasePlugin {
   }
 
   async runStarRailChallenge() {
+    const onCaptchaEvent = createRequestCaptchaReporter(this.e)
     const parsed = splitProfileSuffix(this.e.msg)
     const profileId = parsed.hasProfileSuffix ? parsed.profileId : 1
     const userId = String(this.e.user_id)
@@ -128,6 +132,7 @@ export class LotusProfileQuery extends BasePlugin {
       command,
       runner: async profile => {
         const result = await this.starRail.queryProfile({
+          onCaptchaEvent,
           profile,
           profileId,
           command,
@@ -155,14 +160,8 @@ export class LotusProfileQuery extends BasePlugin {
       const profile = await refreshProfileBeforeQuery(userId, profileId, loadedProfile)
       const result = await runner(profile)
       if (!result.forwarded?.length) {
-        const message = pickMessage(result.messages)
-        if (message) {
-          await replyText(this, `[荷花插件]${message}`)
-        } else {
-          // 外部插件没有任何经包装事件回复的内容：其深层代码（如 MysInfo）已自行回复进群，
-          // 这里不再补兜底文案，避免在喵喵已报错后追加「没有返回图片」噪音
-          logger?.mark?.(`[Lotus-Plugin] ${command} 无转发图片且无捕获回复（外部插件应已自行回复），跳过兜底文案`)
-        }
+        const message = pickMessage(result.messages) || `${command} 已执行，但外部插件没有返回图片。`
+        await replyText(this, `[荷花插件]${message}`)
       }
     } catch (error) {
       if (isMissingProfileError(error)) {
@@ -172,7 +171,7 @@ export class LotusProfileQuery extends BasePlugin {
       logger?.error?.(`[Lotus-Plugin] profile query failed: ${error.stack || error.message}`)
       const image = await renderStatusCard({
         title,
-        subtitle: `${accountDisplay(String(userId))} · Profile ${profileId}`,
+        subtitle: `QQ ${userId} · Profile ${profileId}`,
         badge: "失败",
         message: error.message,
         userId,
@@ -192,8 +191,9 @@ export class LotusProfileQuery extends BasePlugin {
 async function refreshProfileBeforeQuery(userId, profileId, profile) {
   if (!profile?.account?.stoken) return profile
   try {
-    return await new AccountService().refresh(userId, profileId)
+    return await refreshAccountAndSync(userId, profileId, { expectedProfile: profile })
   } catch (error) {
+    if (isAccountChangedError(error)) throw error
     logger?.debug?.(`[Lotus-Plugin] profile query pre-refresh skipped: ${error.message}`)
     return profile
   }
@@ -205,7 +205,8 @@ function miaoGameFromMessage(message = "") {
 }
 
 function normalizeMiaoCommand(message = "", game = "gs", method = "") {
-  const text = String(message || "").trim()
+  let text = String(message || "").trim().replace(/^#原神/, "#")
+  if (method === "talentStat") text = text.replace(/行迹/g, "天赋")
   if (text.startsWith("*")) return `#星铁${text.replace(/^\*+/, "")}`
   if (game === "sr" && text.startsWith("#") && !/^#星铁/.test(text)) return text.replace(/^#/, "#星铁")
   const command = text.replace(/^#原神/, "#").replace(/^#(喵喵)?当期/, "#$1本期")
@@ -219,10 +220,7 @@ function normalizeMiaoCommand(message = "", game = "gs", method = "") {
 }
 
 function normalizeZzzCommand(message = "") {
-  const text = String(message || "").trim()
-    .replace(/^％/, "%")
-    .replace(/^(?:[#/](?:zzz|绝区零)|(?:zzz|绝区零))/i, "%")
-    .replace(/^%(?:zzz|绝区零)/i, "%")
+  const text = normalizeZzzPrefix(message, "%")
     .replace(/^%(?:本期|当期)/, "%")
     .replace(/式舆防卫(?!(?:战))/, "式舆防卫战")
   // ZZZ-Plugin 的 rulePrefix 要求命令带 zzz/绝区零 标识；Lotus 对外

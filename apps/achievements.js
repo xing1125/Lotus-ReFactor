@@ -1,7 +1,6 @@
 const BasePlugin = globalThis.plugin
-import { accountDisplay } from "../services/checkin/account.js"
 
-import { resolvePriority } from "../core/intercept/priority.js"
+import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
 import { matchPersonalQuery } from "../core/intercept/personal-query.js"
 import {
   isMissingProfileError,
@@ -10,7 +9,6 @@ import {
   profileLoginRequiredMessage,
   PROFILE_ID_SUFFIX_PATTERN,
 } from "../core/config/profile.js"
-import { getRenderBackgrounds } from "../core/render/background.js"
 import { renderStatusCard, renderTemplate } from "../core/render/service.js"
 import { replyForward, replyImage, replyText } from "../core/transport/reply.js"
 import { getRoleUid, pickRole, splitProfileSuffix } from "../services/pluginBridge/common.js"
@@ -63,7 +61,7 @@ export class LotusAchievements extends BasePlugin {
       name: "[Lotus-Plugin] Achievements",
       dsc: "Genshin achievement atlas progress",
       event: "message",
-      priority: resolvePriority("achievements"),
+      priority: LOTUS_INTERCEPT_PRIORITY,
       rule: [
         {
           reg: `^#成就(?:目录|索引|列表|查漏)?${PROFILE_ID_SUFFIX_PATTERN}$`,
@@ -88,7 +86,6 @@ export class LotusAchievements extends BasePlugin {
     this.service = options.service || new GenshinAchievementService(options)
     this.renderCategory = options.renderCategory || renderTemplate
     this.resolveCategoryUid = options.resolveCategoryUid || resolveGenshinUid
-    this.getCategoryBackgrounds = options.getCategoryBackgrounds || getRenderBackgrounds
   }
 
   async index() {
@@ -202,7 +199,6 @@ export class LotusAchievements extends BasePlugin {
       let offset = 0
       let pageCount = 0
       const images = []
-      const backgrounds = await this.getCategoryBackgrounds(1)
       while (true) {
         const result = await this.service.buildCategory({
           uid,
@@ -210,7 +206,6 @@ export class LotusAchievements extends BasePlugin {
           offset,
           limit: ACHIEVEMENT_CATEGORY_PAGE_LIMIT,
         })
-        result.renderData.backgrounds = backgrounds
         pageCount += 1
         const page = result.renderData.page || { index: pageCount, total: pageCount, hasNext: false }
         if (pageCount === 1 && page.total > 1) {
@@ -248,7 +243,7 @@ export class LotusAchievements extends BasePlugin {
     logger?.warn?.(`[Lotus-Plugin] achievement failed: ${error.stack || error.message}`)
     const image = await renderStatusCard({
       title,
-      subtitle: `${accountDisplay(String(userId))} · Profile ${profileId}`,
+      subtitle: `QQ ${userId} · Profile ${profileId}`,
       badge: "失败",
       message: isAchievementDataMissing(error)
         ? "成就图鉴数据缺失，请先执行图鉴全量更新或检查 atlas.data_root。"

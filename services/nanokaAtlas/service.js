@@ -52,6 +52,8 @@ const INDEX_CACHE = new Map()
 const ALIAS_CACHE = {
   loaded: false,
   map: new Map(),
+  // 版本号：resetAtlasAliasCache 时递增，供对外别名门面做派生缓存失效（只读）
+  version: 1,
 }
 
 // 使别名缓存失效：xiaoyao Atlas_alias/*.yaml 改动后，下次 loadAtlasAliasMap 会重新读取。
@@ -59,6 +61,7 @@ const ALIAS_CACHE = {
 export function resetAtlasAliasCache() {
   ALIAS_CACHE.loaded = false
   ALIAS_CACHE.map = new Map()
+  ALIAS_CACHE.version = (ALIAS_CACHE.version || 1) + 1
 }
 const ATLAS_PAGE_INDEX_CACHE = new Map()
 // 物品（材料）详情缓存：用于给养成材料补「秘境开放星期」批注。
@@ -1668,6 +1671,53 @@ async function loadAtlasAliasMap() {
   return aliases
 }
 
+// 角色名 → 专武标准名：查武器别名表（wuqi_tujian.yaml 等）里的「xx专武」种子。
+// 别名 map 为双向映射，输入「胡桃专武」→「护摩之杖」；找不到返回 null。
+export async function resolveSignatureWeapon(charName) {
+  const text = String(charName || "").trim()
+  if (!text) return null
+  const aliasMap = await loadAtlasAliasMap()
+  const hits = aliasMap.get(normalizeForMatch(`${text}专武`)) || []
+  const hit = hits.find(item => item.game === "原神") || hits[0]
+  return hit?.value || null
+}
+
+// 通用别名 → 标准名（如圣遗物「血红套」→「血红之证」）。找不到返回 null。
+export async function resolveAtlasAliasName(text) {
+  const key = String(text || "").trim()
+  if (!key) return null
+  const aliasMap = await loadAtlasAliasMap()
+  const hits = aliasMap.get(normalizeForMatch(key)) || []
+  // 双向映射下标准名也会映到自身别名，过滤掉 value 与输入相同者
+  const hit = hits.find(item => item.value !== key && item.game === "原神")
+    || hits.find(item => item.value !== key)
+    || null
+  return hit ? { value: hit.value, game: hit.game } : null
+}
+
+/** 只读别名版本号（同步）：外部派生缓存据此判断是否需要重建 */
+export function getAtlasAliasVersion() {
+  return ALIAS_CACHE.version || 1
+}
+
+/**
+ * 只读别名快照：把内部双向 Map 摊平成冻结条目，供对外门面使用。
+ * 刻意不返回内部 Map 引用，避免外部写入污染 ALIAS_CACHE。
+ */
+export async function getAtlasAliasSnapshot() {
+  const map = await loadAtlasAliasMap()
+  const entries = []
+  for (const [key, hits] of map) {
+    for (const hit of hits) {
+      entries.push(Object.freeze({ key, value: hit.value, game: hit.game }))
+    }
+  }
+  return Object.freeze({
+    version: getAtlasAliasVersion(),
+    entries: Object.freeze(entries),
+  })
+}
+
 function atlasMiaoAliasFiles() {
   const files = []
   for (const base of atlasMiaoPluginRoots()) {
@@ -1688,11 +1738,17 @@ function atlasZzzAliasFiles() {
   return uniqueExistingFiles(files)
 }
 
+// 别名源原本只按 process.cwd() 找，bot 进程没问题，但对外只读门面被其它进程
+// 动态 import 时 cwd 未必是 bot 根目录，会静默退化成只剩静态别名。
+// 用 rootPath 反推一次 bot 根作为兜底候选（放在 cwd 之后，不改变原有优先级）。
+const BOT_ROOT_FROM_MODULE = path.resolve(rootPath, "..", "..")
+
 function atlasMiaoPluginRoots() {
   return [
     path.join(process.cwd(), "plugins", "miao-plugin"),
     path.join(process.cwd(), "plugins", "Miao-Plugin"),
     path.join(process.cwd(), "plugins", "miao-plugin-fork"),
+    path.join(BOT_ROOT_FROM_MODULE, "plugins", "miao-plugin"),
     path.join(rootPath, "reference-projects", "mine", "miao-plugin"),
   ]
 }
@@ -1701,6 +1757,7 @@ function atlasZzzPluginRoots() {
   return [
     path.join(process.cwd(), "plugins", "ZZZ-Plugin"),
     path.join(process.cwd(), "plugins", "zzz-plugin"),
+    path.join(BOT_ROOT_FROM_MODULE, "plugins", "ZZZ-Plugin"),
     path.join(rootPath, "reference-projects", "external", "ZZZ-Plugin"),
   ]
 }
@@ -1714,6 +1771,8 @@ function atlasXiaoyaoAliasRoots() {
   return [
     path.join(process.cwd(), "plugins", "Lotus-Plugin"),
     path.join(process.cwd(), "plugins", "xiaoyao-cvs-plugin"),
+    path.join(BOT_ROOT_FROM_MODULE, "plugins", "Lotus-Plugin"),
+    path.join(BOT_ROOT_FROM_MODULE, "plugins", "xiaoyao-cvs-plugin"),
     path.join(rootPath, "reference-projects", "external", "xiaoyao-cvs-plugin"),
   ]
 }
@@ -4820,3 +4879,10 @@ const CHALLENGE_TARGETS = Object.freeze({
     schedule: CHALLENGE_SCHEDULES.zzzAssault,
   },
 })
+
+// 调试用导出：专武别名排查（weaponByChar 链路验证）
+export async function debugAliasLookup(text) {
+  const map = await loadAtlasAliasMap()
+  const norm = normalizeForMatch(text)
+  return { norm, hits: map.get(norm) || null, total: map.size }
+}

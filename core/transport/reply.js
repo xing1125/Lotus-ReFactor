@@ -69,13 +69,12 @@ export async function replyTextWithOptionalRecall(target, text, options = {}) {
 
 async function callReply(target, payload, options = {}) {
   // 群聊里 @ 发起人（对标 jj e.reply(msg, false, { at: true })）
+  // 注意：只在调用方显式传 { at: true } 时生效，不改变其它回复行为。
   if (options.at) {
     const e = target?.e || target
-    if (typeof target?.reply === "function" && e?.isGroup) {
-      return target.reply(payload, false, { at: true })
-    }
-    if (typeof e?.reply === "function") {
-      return e.reply(payload, false, { at: true })
+    if (e?.isGroup) {
+      if (typeof target?.reply === "function") return target.reply(payload, false, { at: true })
+      if (typeof e?.reply === "function") return e.reply(payload, false, { at: true })
     }
   }
   if (typeof target?.reply === "function") {

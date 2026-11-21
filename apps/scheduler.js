@@ -1,5 +1,4 @@
 const BasePlugin = globalThis.plugin
-import { accountDisplay } from "../services/checkin/account.js"
 
 import { loadGlobalConfig, saveGlobalConfig } from "../core/config/global.js"
 import { listProfileIds, loadProfile } from "../core/config/profile.js"
@@ -7,8 +6,7 @@ import { PermissionService } from "../core/permissions/service.js"
 import { SchedulerService, cronToMinuteOfDay, nextDateString } from "../core/scheduler/service.js"
 import { renderStatusCard } from "../core/render/service.js"
 import { replyImage, replyText } from "../core/transport/reply.js"
-import { ScheduledSigninService } from "../services/checkin/scheduled.js"
-import { AutoResignService } from "../services/checkin/autoResign.js"
+import { COMMUNITY_RETRY_FINAL_CRON, ScheduledSigninService } from "../services/checkin/scheduled.js"
 import {
   applySchedulerSettings,
   describeSchedulerSettings,
@@ -37,6 +35,7 @@ export class LotusScheduler extends BasePlugin {
         fnc: this.runDueCheckins.bind(this),
         log: false,
       },
+      this.communityRetryFinalTask(),
       {
         name: "荷花插件生成明日签到计划",
         cron: "0 0 0 * * ? *",
@@ -47,12 +46,6 @@ export class LotusScheduler extends BasePlugin {
         name: "荷花插件签到计划补偿检查",
         cron: "0 */10 * * * ? *",
         fnc: this.catchUpTomorrowPlanTask.bind(this),
-        log: false,
-      },
-      {
-        name: "荷花插件自动补签",
-        cron: "0 0 12 * * ? *",
-        fnc: this.autoResignTask.bind(this),
         log: false,
       },
     ]
@@ -68,6 +61,7 @@ export class LotusScheduler extends BasePlugin {
           fnc: this.runDueCheckins.bind(this),
           log: false,
         },
+        this.communityRetryFinalTask(),
         {
           name: "荷花插件生成明日签到计划",
           cron: globalConfig.scheduler?.plan_generate_cron || "0 0 0 * * ? *",
@@ -78,12 +72,6 @@ export class LotusScheduler extends BasePlugin {
           name: "荷花插件签到计划补偿检查",
           cron: globalConfig.scheduler?.catch_up_cron || "0 */10 * * * ? *",
           fnc: this.catchUpTomorrowPlanTask.bind(this),
-          log: false,
-        },
-        {
-          name: "荷花插件自动补签",
-          cron: globalConfig.scheduler?.auto_resign?.cron || "0 0 12 * * ? *",
-          fnc: this.autoResignTask.bind(this),
           log: false,
         },
       ]
@@ -140,7 +128,7 @@ export class LotusScheduler extends BasePlugin {
     }
     const image = await renderSchedulePlan({ ...plan, entries }, {
       title: "我的签到时间",
-      subtitle: `${date} · ${accountDisplay(String(userId))}`,
+      subtitle: `${date} · QQ ${userId}`,
       userId,
     })
     await replyImage(this, image, "[荷花插件]这是你明日的签到时间。")
@@ -231,7 +219,7 @@ export class LotusScheduler extends BasePlugin {
       message: result.count ? "已执行所有到期且未完成的签到任务，结果会分别通知对应用户。" : "当前没有到期且未完成的签到任务。",
       userId: this.e.user_id,
       items: result.results.slice(0, 8).map(({ entry, outcome }) => ({
-        label: `${accountDisplay(String(entry.qq))} · P${entry.profileId}`,
+        label: `QQ ${entry.qq} · P${entry.profileId}`,
         value: `${outcome.ok ? "成功" : "失败"} · ${outcome.stage}`,
       })),
     }, {
@@ -275,21 +263,17 @@ export class LotusScheduler extends BasePlugin {
     return true
   }
 
-  // 自动补签：对当日签到失败的条目自动重试一次（黑名单过滤登录失效类，成功才通知）。
-  // 详细约束见 services/checkin/autoResign.js 头注释。
-  async autoResignTask(options = {}) {
-    const globalConfig = await loadGlobalConfig()
-    if (globalConfig.scheduler?.enable === false) {
-      return { ok: true, disabled: true }
+  communityRetryFinalTask() {
+    return {
+      name: "荷花插件签到当日兜底",
+      cron: COMMUNITY_RETRY_FINAL_CRON,
+      fnc: () => this.runDueCheckins({ communityRetriesOnly: true }),
+      log: false,
     }
-    const cfg = globalConfig.scheduler?.auto_resign || {}
-    if (cfg.enable === false) {
-      return { ok: true, disabled: true, reason: "auto_resign_disabled" }
-    }
-    return new AutoResignService({ bot: globalThis.Bot }).run({ config: globalConfig, ...options })
   }
 
-  async runDueCheckins(options = {}) {    const globalConfig = await loadGlobalConfig()
+  async runDueCheckins(options = {}) {
+    const globalConfig = await loadGlobalConfig()
     if (globalConfig.scheduler?.enable === false) {
       return {
         ok: true,
@@ -302,8 +286,9 @@ export class LotusScheduler extends BasePlugin {
     const result = await new ScheduledSigninService({
       scheduler: new SchedulerService({ config: globalConfig.scheduler }),
     }).runDue(options)
-    // 执行结果日志已移至 ScheduledSigninService.runDue（仅发起方打印），
-    // 这里不再重复打印，避免单飞锁共享等待时同一结果刷屏 N 条
+    if (result.count) {
+      logger?.mark?.(`[Lotus-Plugin] scheduled checkin executed: ${result.count}`)
+    }
     return result
   }
 }

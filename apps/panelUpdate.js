@@ -1,7 +1,7 @@
+import { ZZZ_COMMAND_PREFIX } from "../core/intercept/game-prefix.js"
 const BasePlugin = globalThis.plugin
-import { accountDisplay } from "../services/checkin/account.js"
 
-import { resolvePriority } from "../core/intercept/priority.js"
+import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
 import {
   isMissingProfileError,
   listAllProfiles,
@@ -12,7 +12,7 @@ import {
 } from "../core/config/profile.js"
 import { loadGlobalConfig } from "../core/config/global.js"
 import { renderStatusCard } from "../core/render/service.js"
-import { AccountService } from "../core/login/account.js"
+import { refreshAccountAndSync, isAccountChangedError } from "../core/login/refresh.js"
 import { PermissionService } from "../core/permissions/service.js"
 import { replyImage, replyText } from "../core/transport/reply.js"
 import { MiaoPanelBridge } from "../services/pluginBridge/miaoPanel.js"
@@ -25,7 +25,7 @@ export class LotusPanelUpdate extends BasePlugin {
       name: "[Lotus-Plugin] Panel Update",
       dsc: "Lotus profile aware miao panel update",
       event: "message",
-      priority: resolvePriority("panel_update"),
+      priority: LOTUS_INTERCEPT_PRIORITY,
       rule: [
         {
           reg: `^#(原神)?(更新面板|面板更新|全部面板更新|更新全部面板)${PROFILE_ID_SUFFIX_PATTERN}$`,
@@ -44,7 +44,7 @@ export class LotusPanelUpdate extends BasePlugin {
           fnc: "zzzPanel",
         },
         {
-          reg: `^(?:[%％](?:zzz|ZZZ|绝区零)?|[#/](?:zzz|ZZZ|绝区零)|(?:zzz|ZZZ|绝区零))(更新面板|面板更新|全部面板更新|更新全部面板)${PROFILE_ID_SUFFIX_PATTERN}$`,
+          reg: `^${ZZZ_COMMAND_PREFIX}(更新面板|面板更新|全部面板更新|更新全部面板)${PROFILE_ID_SUFFIX_PATTERN}$`,
           fnc: "zzzPanel",
         },
         {
@@ -102,7 +102,7 @@ export class LotusPanelUpdate extends BasePlugin {
       logger?.error?.(`[Lotus-Plugin] panel update failed: ${error.stack || error.message}`)
       const image = await renderStatusCard({
         title: "面板更新",
-        subtitle: `${accountDisplay(String(userId))} · Profile ${profileId}`,
+        subtitle: `QQ ${userId} · Profile ${profileId}`,
         badge: "失败",
         message: error.message,
         userId,
@@ -138,7 +138,7 @@ export class LotusPanelUpdate extends BasePlugin {
       message: `已清理 ${result.deleted.length} 个 UID 的 miao 面板数据与排名索引，并按 profile 重新更新。`,
       userId,
       items: result.updates.slice(0, 14).map(item => ({
-        label: `${accountDisplay(String(item.qq))} · P${item.profileId} · ${gameLabel(item.game)}`,
+        label: `QQ ${item.qq} · P${item.profileId} · ${gameLabel(item.game)}`,
         value: item.ok ? `更新成功 · UID ${item.uid}` : `失败：${item.error}`.slice(0, 70),
       })),
     }, {
@@ -209,8 +209,9 @@ async function loadMiaoPlayer() {
 async function refreshProfileBeforePanel(userId, profileId, profile) {
   if (!profile?.account?.stoken) return profile
   try {
-    return await new AccountService().refresh(userId, profileId)
+    return await refreshAccountAndSync(userId, profileId, { expectedProfile: profile })
   } catch (error) {
+    if (isAccountChangedError(error)) throw error
     logger?.debug?.(`[Lotus-Plugin] panel pre-refresh skipped: ${error.message}`)
     return profile
   }

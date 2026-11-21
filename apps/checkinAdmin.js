@@ -1,5 +1,4 @@
 const BasePlugin = globalThis.plugin
-import { accountDisplay } from "../services/checkin/account.js"
 
 import { loadGlobalConfig } from "../core/config/global.js"
 import {
@@ -13,7 +12,7 @@ import { renderStatusCard } from "../core/render/service.js"
 import { isProfileCheckinEnabled } from "../core/scheduler/service.js"
 import { replyImage, replyText } from "../core/transport/reply.js"
 import { readCheckinAudit } from "../services/checkin/audit.js"
-import { registerProfileWithGenshin } from "../services/genshinBridge/profile.js"
+import { refreshAccountAndSync } from "../core/login/refresh.js"
 import {
   groupMemberDisplayName,
   normalizeGroupMemberEntries,
@@ -61,13 +60,13 @@ export class LotusCheckinAdmin extends BasePlugin {
     })
     const image = await renderStatusCard({
       title: "签到日志",
-      subtitle: master ? "最近全局记录" : `${accountDisplay(String(this.e.user_id))}`,
+      subtitle: master ? "最近全局记录" : `QQ ${this.e.user_id}`,
       badge: String(rows.length),
       message: rows.length ? "最近签到审计记录如下。" : "暂无签到审计记录。",
       userId: this.e.user_id,
       items: rows.map(row => ({
         label: `${timeShort(row.time)} · P${row.profileId}`,
-        value: `${row.ok ? "成功" : "失败"} · ${row.stage || "-"} · ${accountDisplay(String(row.qq))}`,
+        value: `${row.ok ? "成功" : "失败"} · ${row.stage || "-"} · QQ ${row.qq}`,
       })),
     }, {
       saveId: `lotus-checkin-logs-${this.e.user_id || "user"}`,
@@ -91,8 +90,7 @@ export class LotusCheckinAdmin extends BasePlugin {
       const qq = profile.user?.qq
       const profileId = profile.profile?.id || 1
       try {
-        const refreshed = await account.refresh(qq, profileId)
-        await registerProfileWithGenshin({ qq, profile: refreshed }).catch(() => null)
+        await refreshAccountAndSync(qq, profileId, { accountService: account, expectedProfile: profile })
         results.push({ qq, profileId, ok: true })
       } catch (error) {
         results.push({ qq, profileId, ok: false, error })
@@ -107,7 +105,7 @@ export class LotusCheckinAdmin extends BasePlugin {
       message: "已按 profile 粒度批量刷新，不会互相覆盖 cookie/stoken。",
       userId: this.e.user_id,
       items: results.slice(0, 14).map(item => ({
-        label: `${accountDisplay(String(item.qq))} · P${item.profileId}`,
+        label: `QQ ${item.qq} · P${item.profileId}`,
         value: item.ok ? "刷新成功" : `失败：${item.error?.message || "未知错误"}`.slice(0, 60),
       })),
     }, {
@@ -136,7 +134,7 @@ async function buildGlobalProfileListView() {
     badge: String(profiles.length),
     message: profiles.length ? "当前已注册 profile 如下。" : "当前没有已注册 profile。",
     items: profiles.slice(0, 14).map(profile => ({
-      label: `${accountDisplay(String(profile.user?.qq))} · P${profile.profile?.id || 1}`,
+      label: `QQ ${profile.user?.qq} · P${profile.profile?.id || 1}`,
       value: profileSummary(profile),
     })),
   }
@@ -146,7 +144,7 @@ async function buildOwnProfileListView(e) {
   const profiles = (await loadProfilesForUser(e?.user_id)).filter(isProfileCheckinEnabled)
   return {
     title: "我的签到名单",
-    subtitle: `${accountDisplay(String(e?.user_id || "-"))}`,
+    subtitle: `QQ ${e?.user_id || "-"}`,
     badge: String(profiles.length),
     message: profiles.length ? "你已注册的 profile 如下。" : "你还没有注册自动签到 profile。",
     items: profiles.slice(0, 14).map(profile => ({

@@ -17,6 +17,13 @@ import { loadGlobalConfig } from "../../core/config/global.js"
 // （线上已复现：回完「签到中请稍后」后 8 分钟无任何日志，直到手动重启）。
 const DEFAULT_RUN_TIMEOUT_MS = 180000
 
+// 免人工打码方案（按顺序尝试）。签到在群里静默执行，不能弹人工验证链接，
+// 所以桥接器只在白名单内切换；新增自动方案时记得同步这里。
+// 实际取值优先读后台 checkin.captcha.providers，这里只是缺省兜底。
+const UNATTENDED_CAPTCHA_PROVIDERS = ["test_nine", "ttocr", "vision_ai"]
+const DEFAULT_CAPTCHA_PROVIDER_ATTEMPTS = 2
+const DEFAULT_CAPTCHA_CHAIN_ATTEMPTS = 1
+
 export class MihoyoBbsToolsRunner {
   constructor(options = {}) {
     this.python = options.python || new PythonEnvService(options)
@@ -240,12 +247,29 @@ export async function handleCaptchaRequest(requestFile, options = {}) {
 
 export async function solveCaptchaRequest(request, options = {}) {
   const solver = options.solveCaptcha || solveCaptcha
+  // 桥接器参数走后台 checkin.captcha（锅巴「验证码链 · 签到专用」），改配置下一轮即生效。
+  const bridge = (await loadGlobalConfig().catch(() => null))?.checkin?.captcha || {}
+  const providerOrder = Array.isArray(bridge.providers) && bridge.providers.length
+    ? bridge.providers
+    : UNATTENDED_CAPTCHA_PROVIDERS
+  const providerAttempts = Number(bridge.provider_attempts) > 0
+    ? Math.floor(Number(bridge.provider_attempts))
+    : DEFAULT_CAPTCHA_PROVIDER_ATTEMPTS
+  const chainAttempts = Number(bridge.chain_attempts) > 0
+    ? Math.floor(Number(bridge.chain_attempts))
+    : DEFAULT_CAPTCHA_CHAIN_ATTEMPTS
   const result = await solver({
     gt: request.gt,
     challenge: request.challenge,
   }, {
     request,
     maxChallengeRefreshAttempts: 0,
+    // 签到桥没法自己刷新 challenge（新 challenge 只能由 Python 侧重新发起），
+    // 所以这里只在「免人工」方案之间切换：gtmanual 要人点链接，
+    // 群里静默签到没人看得到，只会把整轮拖到 captcha 超时。
+    providerOrder,
+    providerAttempts,
+    chainAttempts,
     onCaptchaEvent: options.onCaptchaEvent,
   })
 

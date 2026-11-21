@@ -8,6 +8,12 @@ import { pipeline } from "node:stream/promises"
 import { createGunzip } from "node:zlib"
 import YAML from "yaml"
 import { isCookieRefreshableResponse } from "../../core/captcha/mysHandler.js"
+import { installMysHttpDiagnostics } from "./mys-http-diagnostics.js"
+import { installMysRequestCompatibility, prepareMysRequestRegistry } from "./mys-request-context.js"
+import { installMysDeviceCompatibility } from "./mys-device.js"
+import { installZzzDirectRequests } from "./zzz-direct-requests.js"
+import { installMysUserRequests } from "./mys-user-requests.js"
+import { installZzzAuthKeyRequests } from "./zzz-authkey-requests.js"
 
 import {
   LEGACY_CAPTCHA_HANDLER_NAMESPACES,
@@ -15,9 +21,6 @@ import {
   LOTUS_CAPTCHA_HANDLER_NAMESPACE,
   LOTUS_INTERCEPT_PRIORITY,
   LOTUS_RUNTIME_DISABLED_PLUGIN_NAMES,
-  isLotusEntry,
-  sortPriorityEntries,
-  syncRoutingPriorities,
 } from "../../core/intercept/priority.js"
 
 const IMAGE_SUMMARY_RELEASE_URL = "https://api.github.com/repos/palemoky/chinese-poetry-api/releases/latest"
@@ -42,6 +45,9 @@ export async function installLotusRuntimeInterception() {
     patchRuntimeDisableConfig(),
     patchPluginsLoader(),
     patchGenshinMysInfoCookieRefresh(),
+    patchGenshinMysHttpDiagnostics(),
+    patchGenshinMysRequestContext(),
+    patchRuntimeMysDevice(),
     installGlobalImageSummary(),
   ])
 
@@ -188,6 +194,54 @@ async function patchPluginsLoader() {
   scheduleEnforce(loader)
   enforceLotusInterception(loader)
   return { ok: true }
+}
+
+async function patchGenshinMysHttpDiagnostics() {
+  const MysApi = await importRuntimeDefault("genshin", "model", "mys", "mysApi.js")
+  return installMysHttpDiagnostics(MysApi)
+}
+
+async function patchGenshinMysRequestContext() {
+  const [MysApi, MysUser, MysZZZApi] = await Promise.all([
+    importRuntimeDefault("genshin", "model", "mys", "mysApi.js"),
+    importRuntimeDefault("genshin", "model", "mys", "MysUser.js"),
+    importRuntimeDefault("ZZZ-Plugin", "dist", "lib", "mysapi.js"),
+  ])
+  if (!MysApi || !MysUser) return { ok: true, skipped: true }
+  await prepareMysRequestRegistry({ MysUser })
+  const result = installMysRequestCompatibility({ MysApi, MysUser, MysZZZApi })
+  installMysUserRequests({ MysUser })
+  const zzzPluginPath = path.join(process.cwd(), "plugins", "ZZZ-Plugin", "dist", "lib", "plugin.js")
+  if (MysZZZApi && await fileExists(zzzPluginPath)) {
+    try {
+      const [{ ZZZPlugin }, { getCk }] = await Promise.all([
+        import(pathToFileURL(zzzPluginPath).href),
+        import(pathToFileURL(path.join(path.dirname(zzzPluginPath), "common.js")).href),
+      ])
+      const direct = installZzzDirectRequests({ ZZZPlugin, MysZZZApi, getCk })
+      if (!direct.ok || direct.skipped) throw new Error("ZZZ getAPI adapter unavailable")
+      const [{ GachaLog }, { getZZZGachaLink }] = await Promise.all([
+        import(pathToFileURL(path.join(path.dirname(zzzPluginPath), "..", "apps", "gachalog.js")).href),
+        import(pathToFileURL(path.join(path.dirname(zzzPluginPath), "gacha", "core.js")).href),
+      ])
+      const authkey = installZzzAuthKeyRequests({ GachaLog, getZZZGachaLink })
+      if (!authkey.ok || authkey.skipped) throw new Error("ZZZ authkey adapter unavailable")
+    } catch {
+      logWarn("ZZZ 设备或抽卡凭据适配未加载，请检查插件加载状态")
+      return { ok: false, reason: "ZZZ direct request compatibility unavailable" }
+    }
+  }
+  if (!MysZZZApi && await fileExists(path.join(process.cwd(), "plugins", "ZZZ-Plugin", "dist", "lib", "mysapi.js"))) {
+    logWarn("ZZZ 请求上下文适配未加载，请检查插件加载状态")
+    return { ok: false, reason: "ZZZ request compatibility unavailable" }
+  }
+  if (result.ok && !result.skipped) logInfo(`米游社请求上下文已加载：genshin${MysZZZApi ? "、ZZZ" : ""}`)
+  return result
+}
+
+async function patchRuntimeMysDevice() {
+  const Runtime = await importYunzaiDefault("../../../../lib/plugins/runtime.js")
+  return installMysDeviceCompatibility(Runtime)
 }
 
 async function patchGenshinMysInfoCookieRefresh() {
@@ -398,122 +452,25 @@ async function loadCachedImageSummaryLines() {
     .slice(0, IMAGE_SUMMARY_LINE_LIMIT)
 }
 
-async function generatePoetryLinesFromDb(dbFile) {
-  const major = Number(String(process.versions.node || "").split(".")[0] || 0)
-  if (major < 24) return generatePoetryLinesWithPython(dbFile)
-
-  let DatabaseSync
+export async function generatePoetryLinesFromDb(dbFile) {
+  const { default: initSqlJs } = await import("sql.js")
+  const SQL = await initSqlJs()
+  const db = new SQL.Database(await fs.readFile(dbFile))
   try {
-    ;({ DatabaseSync } = await import("node:sqlite"))
-  } catch {
-    return generatePoetryLinesWithPython(dbFile)
-  }
-
-  const db = new DatabaseSync(dbFile, { readOnly: true })
-  try {
-    const rows = db.prepare(`
-      SELECT p.title AS title, p.content AS content, a.name AS author, d.name AS dynasty
+    const statement = db.prepare(`SELECT p.title AS title, p.content AS content, a.name AS author, d.name AS dynasty
       FROM poems_zh_hans p
       LEFT JOIN authors_zh_hans a ON a.id = p.author_id
       LEFT JOIN dynasties_zh_hans d ON d.id = p.dynasty_id
-      WHERE p.content IS NOT NULL AND p.content != ''
-      ORDER BY random()
-      LIMIT 1200
-    `).all()
+      WHERE p.content IS NOT NULL AND p.content != '' ORDER BY random() LIMIT 1200`)
     const lines = []
-    for (const row of rows) {
-      lines.push(...formatPoetryRowLines(row))
-      if (lines.length >= IMAGE_SUMMARY_LINE_LIMIT) break
-    }
-    return shuffle(lines).slice(0, IMAGE_SUMMARY_LINE_LIMIT)
-  } finally {
-    db.close()
-  }
-}
-
-async function generatePoetryLinesWithPython(dbFile) {
-  const { spawn } = await import("node:child_process")
-  const candidates = process.platform === "win32"
-    ? [["py", ["-3"]], ["python", []], ["python3", []]]
-    : [["python3", []], ["python", []]]
-  const code = `
-import json
-import random
-import re
-import sqlite3
-import sys
-
-db_file = sys.argv[1]
-limit = int(sys.argv[2])
-con = sqlite3.connect(db_file)
-rows = con.execute("""
-  SELECT p.title AS title, p.content AS content, a.name AS author, d.name AS dynasty
-  FROM poems_zh_hans p
-  LEFT JOIN authors_zh_hans a ON a.id = p.author_id
-  LEFT JOIN dynasties_zh_hans d ON d.id = p.dynasty_id
-  WHERE p.content IS NOT NULL AND p.content != ''
-  ORDER BY random()
-  LIMIT 1200
-""").fetchall()
-lines = []
-for title, content, author, dynasty in rows:
-  try:
-    parts = json.loads(content)
-  except Exception:
-    parts = [content]
-  source = " ".join([part for part in [
-    f"[{dynasty}]" if dynasty else "",
-    author or "",
-    f"《{title}》" if title else "",
-  ] if part]).strip()
-  for part in parts:
-    for line in re.split(r"(?<=[。！？!?；;])\\s*|\\n+", str(part or "")):
-      line = re.sub(r"<[^>]+>", "", line)
-      line = re.sub(r"\\s+", " ", line).strip()
-      if line:
-        lines.append(f"{line} —— {source}" if source else line)
-random.shuffle(lines)
-sys.stdout.buffer.write(json.dumps(lines[:limit], ensure_ascii=False).encode("utf-8"))
-`
-
-  for (const [command, args] of candidates) {
-    const lines = await runPythonLineExtractor(command, [...args, "-c", code, dbFile, String(IMAGE_SUMMARY_LINE_LIMIT)])
-    if (lines.length) return lines
-  }
-  return []
-}
-
-function runPythonLineExtractor(command, args) {
-  return new Promise(resolve => {
-    let settled = false
-    const child = spawn(command, args, {
-      stdio: ["ignore", "pipe", "ignore"],
-      windowsHide: true,
-    })
-    const chunks = []
-    const done = value => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      resolve(value)
-    }
-    const timer = setTimeout(() => {
-      child.kill()
-      done([])
-    }, 30 * 1000)
-
-    child.stdout.on("data", chunk => chunks.push(chunk))
-    child.on("error", () => done([]))
-    child.on("close", code => {
-      if (code !== 0) return done([])
-      try {
-        const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"))
-        done(Array.isArray(parsed) ? parsed.map(item => cleanSummaryPart(item)).filter(Boolean) : [])
-      } catch {
-        done([])
+    try {
+      while (statement.step()) {
+        lines.push(...formatPoetryRowLines(statement.getAsObject()))
+        if (lines.length >= IMAGE_SUMMARY_LINE_LIMIT) break
       }
-    })
-  })
+    } finally { statement.free() }
+    return shuffle(lines).slice(0, IMAGE_SUMMARY_LINE_LIMIT)
+  } finally { db.close() }
 }
 
 function formatPoetryRowLines(row) {
@@ -643,26 +600,23 @@ function scheduleEnforce(loader) {
 export function enforceLotusInterception(loader) {
   if (!Array.isArray(loader?.priority)) return { ok: false, reason: "loader priority unavailable" }
 
-  loader.priority = sortPriorityEntries(loader.priority)
+  loader.priority = loader.priority
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => {
+      const diff = numericPriority(a.entry.priority) - numericPriority(b.entry.priority)
+      if (diff) return diff
+      if (isLotusEntry(a.entry) && !isLotusEntry(b.entry)) return -1
+      if (!isLotusEntry(a.entry) && isLotusEntry(b.entry)) return 1
+      return a.index - b.index
+    })
+    .map(item => item.entry)
 
   return { ok: true, pruned: 0 }
 }
 
-// isLotusEntry 已上移到 core/intercept/priority.js（荧后台保存路由后免重载热更新需要），
-// 这里保留导出兼容既有引用。
-export { isLotusEntry }
-
-/**
- * 把 config/global.yaml 的 routing（query_priority / front_modules）同步到运行中的
- * loader：更新 Lotus 条目的 priority 并重排消息处理序。荧后台保存后调用即可生效，
- * 不再需要 #重载 Lotus-Plugin。模块开关（modules.*）本就按消息实时查，无需此函数。
- */
-export async function applyRoutingToLoader() {
-  const loader = await importYunzaiDefault("../../../../lib/plugins/loader.js")
-  if (!loader?.priority) return { ok: true, skipped: true }
-  const result = syncRoutingPriorities(loader.priority)
-  if (result.changed) logDebug(`routing hot-applied: ${result.changed} app priority updated`)
-  return result
+export function isLotusEntry(entry) {
+  return String(entry?.key || "").startsWith("Lotus-Plugin")
+    || String(entry?.name || "").startsWith("[Lotus-Plugin]")
 }
 
 async function importYunzaiDefault(relativePath) {
@@ -682,6 +636,12 @@ async function importRuntimeDefault(...segments) {
   } catch {
     return null
   }
+}
+
+function numericPriority(value) {
+  return Number.isFinite(value) || value === Number.NEGATIVE_INFINITY || value === Number.POSITIVE_INFINITY
+    ? value
+    : 5000
 }
 
 function unique(values) {

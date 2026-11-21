@@ -1,4 +1,7 @@
+import { ZZZ_COMMAND_PREFIX } from "../core/intercept/game-prefix.js"
+import { isAccountChangedError } from "../core/login/refresh.js"
 const BasePlugin = globalThis.plugin
+
 import { accountDisplay } from "../services/checkin/account.js"
 
 import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
@@ -60,16 +63,17 @@ export class LotusDailyNote extends BasePlugin {
           fnc: "allDailyNote",
         },
         {
+          // jj 短格式：裸 #体力 = 原神 + 星铁 + 绝区零
           reg: `^#体力${PROFILE_ID_SUFFIX_PATTERN}$`,
           fnc: "allDailyNote",
         },
         {
-          // 裸「体力/便笺」等 = jj 模式：原神 + 星铁 + 绝区零 一起出
+          // 裸「体力/树脂/便笺」等 = jj 模式：原神 + 星铁 + 绝区零 一起出
           reg: `^#?(体力|树脂|查询体力|便笺|便签)${PROFILE_ID_SUFFIX_PATTERN}$`,
           fnc: "allDailyNote",
         },
         {
-          reg: `^#原神(体力|树脂|便笺|便签)${PROFILE_ID_SUFFIX_PATTERN}$`,
+          reg: `^#原神(?:体力|树脂|便笺|便签)${PROFILE_ID_SUFFIX_PATTERN}$`,
           fnc: "genshinDailyNote",
         },
         {
@@ -77,7 +81,7 @@ export class LotusDailyNote extends BasePlugin {
           fnc: "starRailDailyNote",
         },
         {
-          reg: `^#?(星铁|崩铁)(体力|开拓力|便笺|便签)${PROFILE_ID_SUFFIX_PATTERN}$`,
+          reg: `^#?(?:星铁|崩铁)(?:体力|开拓力|便笺|便签)${PROFILE_ID_SUFFIX_PATTERN}$`,
           fnc: "starRailDailyNote",
         },
         {
@@ -85,19 +89,19 @@ export class LotusDailyNote extends BasePlugin {
           fnc: "starRailDailyNote",
         },
         {
-          reg: `^%体力${PROFILE_ID_SUFFIX_PATTERN}$`,
+          reg: `^${ZZZ_COMMAND_PREFIX}(?:体力|note|每日|便笺|便签)${PROFILE_ID_SUFFIX_PATTERN}$`,
           fnc: "zzzDailyNote",
         },
         {
-          reg: `^#(绝区零|绝)(体力|便笺|便签)${PROFILE_ID_SUFFIX_PATTERN}$`,
+          reg: `^#(?:绝区零|绝)(?:体力|便笺|便签)${PROFILE_ID_SUFFIX_PATTERN}$`,
           fnc: "zzzDailyNote",
         },
         {
-          reg: "^#?(原神|星铁|绝区零)?开启体力推送(\\s*\\d+)?$",
+          reg: "^#?(原神|星铁|绝区零)?开启体力推送(?:\\s*\\d+)?$",
           fnc: "enableResinPush",
         },
         {
-          reg: "^#?(原神|星铁|绝区零)?关闭体力推送(\\s*\\d+)?$",
+          reg: "^#?(原神|星铁|绝区零)?关闭体力推送(?:\\s*\\d+)?$",
           fnc: "disableResinPush",
         },
         {
@@ -121,7 +125,7 @@ export class LotusDailyNote extends BasePlugin {
         log: false,
       }]
     } catch (error) {
-      logger?.warn?.(`[Lotus-Plugin] load resin push cron failed: ${error.message}`)
+      globalThis.logger?.warn?.(`[Lotus-Plugin] load resin push cron failed: ${error.message}`)
     }
   }
 
@@ -134,11 +138,11 @@ export class LotusDailyNote extends BasePlugin {
       }
       const result = await new ResinPushService().runPush({ bot: globalThis.Bot })
       if (result.pushed) {
-        logger?.mark?.(`[Lotus-Plugin] resin push sent: ${result.pushed}/${result.scanned}`)
+        globalThis.logger?.mark?.(`[Lotus-Plugin] resin push sent: ${result.pushed}/${result.scanned}`)
       }
       return result
     } catch (error) {
-      logger?.warn?.(`[Lotus-Plugin] resin push scan failed: ${error.message}`)
+      globalThis.logger?.warn?.(`[Lotus-Plugin] resin push scan failed: ${error.message}`)
       return { pushed: 0, scanned: 0, error: error.message }
     }
   }
@@ -221,12 +225,12 @@ export class LotusDailyNote extends BasePlugin {
           : `${gameName} UID:${uid} 未在本群开启体力推送`)
       }
     }
-    await replyText(this, `${lines.join("\n")}`)
+    await replyText(this, lines.join("\n"))
     return true
   }
 
   parseGame(msg = "") {
-    if (msg.includes("星铁")) return "sr"
+    if (msg.includes("星铁") || msg.includes("崩铁") || msg.includes("开拓力")) return "sr"
     if (msg.includes("绝区零")) return "zzz"
     return "gs"
   }
@@ -252,13 +256,14 @@ export class LotusDailyNote extends BasePlugin {
     const hasSuffix = /\d+$/.test(String(this.e.msg || ""))
     const profileId = hasSuffix ? parseProfileIdFromMessage(this.e.msg) : null
 
-    // jj 短格式：单条 @ 等待提示（不带 UID），@ 全程只出现这一次
+    // jj 短格式：群聊里等待提示先 @ 发起人一次；失败文案也带 @ 便于对应，图片本身不再重复 @。
     await replyText(this, "查询中请稍等", { at: true })
 
     const service = new DailyNoteService()
     const started = Date.now()
     let results
     try {
+      // 过码事件不再发到群里（用户反馈刷屏）：底层照常打码，事件只进日志。
       // 必须带硬超时：collect 内部会 await 跨插件 import + 米游社请求，
       // 任一环节不结算就会「回了提示语然后永久静默」，线上已经踩过。
       results = await withDeadline(
@@ -266,7 +271,6 @@ export class LotusDailyNote extends BasePlugin {
           qq: userId,
           profileId,
           games,
-          // 过码过程不再发到群里（用户反馈刷屏）：底层照常打码，事件只进日志。
           onCaptchaEvent: async event => {
             if (event?.type) globalThis.logger?.mark?.(`[Lotus-Plugin] dailyNote captcha event: ${event.type}`)
           },
@@ -275,6 +279,10 @@ export class LotusDailyNote extends BasePlugin {
         "dailyNote collect",
       )
     } catch (error) {
+      if (isAccountChangedError(error)) {
+        await replyText(this, "[荷花插件]登录状态已变化，本次体力查询已停止，请重新发送原指令。", { at: true })
+        return true
+      }
       globalThis.logger?.error?.(
         `[Lotus-Plugin] dailyNote collect failed after ${Date.now() - started}ms: ${error?.stack || error?.message}`,
       )
@@ -285,6 +293,8 @@ export class LotusDailyNote extends BasePlugin {
       `[Lotus-Plugin] dailyNote collect done ${Date.now() - started}ms, ${results?.length || 0} 条`,
     )
 
+    // 未同步 UID 的档案静默跳过（jj 行为：没有就不显示），不要出「未绑定」错误面板。
+    results = (results || []).filter(item => item?.error !== "未同步 UID")
     if (!results.length) {
       await replyText(this, "没有找到可查询的账号，请先 #扫码登录 并同步 UID。")
       return true
@@ -305,7 +315,7 @@ export class LotusDailyNote extends BasePlugin {
       return true
     }
 
-    // jj 出图格式：每个游戏/账号各一张独立面板，逐张发送，不带文字、不再 @、不带插件前缀。
+    // jj 出图格式：每个游戏/账号各一张独立面板，逐张发送，不带文字、不带插件前缀。
     // 渲染和发送也必须各自带 deadline：模板内部会去拉头像/图标等外部资源，
     // 本进程的 undici body 流挂死时那次 fetch 永不结算，卡在这里就等于
     // 「查到数据了却永远不出图」——线上已复现（collect 成功 1543ms 后 60s 无日志）。
@@ -496,6 +506,7 @@ function zzzPanel(data = {}) {
   }
 }
 
+// 体力面板是独立品牌卡：产出 jj daily-note.js 需要的 panels 契约，不走通用 groups/主题色板。
 export function buildDailyNoteRenderData({ userId, profileId, games, results }) {
   const stamp = formatStamp()
   const panels = results.map(item => {

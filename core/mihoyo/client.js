@@ -1,13 +1,26 @@
-import { MIHOYO, GAME_BIZ } from "./constants.js"
+import { randomUUID } from "node:crypto"
+import { MIHOYO, MIHOYO_PROTOCOL, GAME_BIZ, mihoyoUserAgent } from "./constants.js"
 import { getDs2, randomString } from "./ds.js"
+
+const lifecycleId = randomUUID()
+const tokenType = { stoken: 1, ltoken: 2, cookieToken: 4 }
 
 export class MihoyoClient {
   constructor(options = {}) {
+    const device = options.device || {}
     this.fetch = options.fetch || globalThis.fetch
-    this.deviceId = options.deviceId || randomString(32).toUpperCase()
-    this.deviceName = options.deviceName || randomString(8)
-    this.deviceFp = options.deviceFp || "38d7ee0e96649"
-    this.deviceModel = options.deviceModel || randomString(16)
+    const suppliedId = options.deviceId || device.id
+    this.deviceId = suppliedId || randomString(32).toUpperCase()
+    this.deviceName = options.deviceName || device.name || randomString(8)
+    // A saved FP belongs to its supplied ID; a new anonymous session cannot
+    // borrow a fixed fingerprint or attach one to a newly invented ID.
+    this.deviceFp = suppliedId ? options.deviceFp || device.fp || "" : ""
+    this.deviceModel = options.deviceModel || device.model || randomString(16)
+    this.androidVersion = options.androidVersion || device.android_version || "11"
+  }
+
+  withDevice(device = {}) {
+    return new MihoyoClient({ fetch: this.fetch, device })
   }
 
   async createQrLogin() {
@@ -28,14 +41,21 @@ export class MihoyoClient {
   }
 
   async getLtokenByStoken({ stuid, stoken, mid }) {
+    // v2 stoken 的旧 getLTokenBySToken 接口自 2026-11 起返回 1002，
+    // 改走新版通行证 session exchange；旧版仍保留原接口。
+    if (String(stoken).startsWith("v2_")) return this.exchangeSessionToken({ stuid, stoken, mid }, tokenType.ltoken)
     const params = new URLSearchParams()
     params.set("stuid", stuid)
     params.set("stoken", stoken)
     if (mid) params.set("mid", mid)
-    return this.requestJson(`${MIHOYO.passApi}/account/auth/api/getLTokenBySToken?${params}`)
+    return this.requestJson(`${MIHOYO.passApi}/account/auth/api/getLTokenBySToken?${params}`, {
+      headers: this.tokenHeaders({ stuid, stoken, mid }, params.toString(), "5"),
+    })
   }
 
   async getCookieTokenByStoken({ stuid, stoken, mid, method = "GET" }) {
+    if (method !== "GET") throw new Error("stoken exchange only supports GET")
+    if (String(stoken).startsWith("v2_")) return this.exchangeSessionToken({ stuid, stoken, mid }, tokenType.cookieToken)
     const params = new URLSearchParams()
     params.set("game_biz", "hk4e_cn")
     params.set("uid", stuid)
@@ -44,7 +64,46 @@ export class MihoyoClient {
 
     return this.requestJson(`${MIHOYO.webApi}/auth/api/getCookieAccountInfoBySToken?${params}`, {
       method,
+      headers: this.tokenHeaders({ stuid, stoken, mid }, params.toString(), "5"),
     })
+  }
+
+  // 新版通行证换票：v2 stoken → ltoken / cookie_token。
+  // 旧 getLTokenBySToken / getCookieAccountInfoBySToken 已被米游社停用。
+  async exchangeSessionToken({ stuid, stoken, mid }, target) {
+    if (!stuid || !stoken || !mid) throw new Error("stoken exchange credentials are incomplete")
+    const body = JSON.stringify({ dst_token_type: target, src_token: { token: stoken, token_type: tokenType.stoken }, mid })
+      .replace(/[<>&='\u2028\u2029]/gu, char => "\\u" + char.charCodeAt(0).toString(16).padStart(4, "0"))
+    const sdkVersion = MIHOYO_PROTOCOL.passport.exchangeSdkVersion
+    return this.requestJson(`${MIHOYO.passApi}/account/ma-cn-session/app/exchange`, {
+      method: "POST",
+      headers: {
+        ...this.passHeaders(body),
+        "x-rpc-sdk_version": sdkVersion,
+        "x-rpc-account_version": sdkVersion,
+        "x-rpc-lifecycle_id": lifecycleId,
+      },
+      body,
+    })
+  }
+
+  tokenHeaders({ stuid, stoken, mid }, query, clientType) {
+    if (!stuid || !stoken || (String(stoken).startsWith("v2_") && !mid)) throw new Error("stoken exchange credentials are incomplete")
+    if ([stuid, stoken, mid].some(value => /[;\r\n]/.test(String(value || "")))) throw new Error("invalid stoken exchange credentials")
+    return {
+      Cookie: `stuid=${stuid};stoken=${stoken}${mid ? `;mid=${mid}` : ""}`,
+      "User-Agent": mihoyoUserAgent({ model: this.deviceModel, android_version: this.androidVersion }),
+      "x-rpc-app_version": MIHOYO_PROTOCOL.bbsCn.version,
+      "x-rpc-client_type": clientType,
+      "x-rpc-device_id": this.deviceId,
+      ...(this.deviceFp ? { "x-rpc-device_fp": this.deviceFp } : {}),
+      "x-rpc-device_name": this.deviceName,
+      "x-rpc-device_model": this.deviceModel,
+      "x-requested-with": "com.mihoyo.hyperion",
+      Referer: "https://webstatic.mihoyo.com/",
+      "x-rpc-aigis": "",
+      DS: getDs2(query, "", MIHOYO_PROTOCOL.bbsCn.x4Salt),
+    }
   }
 
   async getGameRolesByCookie(cookie, game = "gs") {
@@ -70,16 +129,16 @@ export class MihoyoClient {
       "x-rpc-device_id": this.deviceId,
       "x-rpc-app_id": MIHOYO.passAppId,
       "x-rpc-device_name": this.deviceName,
-      "x-rpc-device_fp": this.deviceFp,
+      ...(this.deviceFp ? { "x-rpc-device_fp": this.deviceFp } : {}),
       "x-rpc-device_model": this.deviceModel,
-      "x-rpc-app_version": MIHOYO.appVersion,
+      "x-rpc-app_version": MIHOYO_PROTOCOL.passport.version,
       "x-rpc-game_biz": "bbs_cn",
-      "x-rpc-sys_version": "11",
+      "x-rpc-sys_version": this.androidVersion,
       "x-rpc-aigis": "",
       "Content-Type": "application/json;",
-      "x-rpc-client_type": "2",
+      "x-rpc-client_type": MIHOYO_PROTOCOL.passport.clientType,
       DS: getDs2("", body, MIHOYO.passSalt),
-      "x-rpc-sdk_version": "1.3.1.2",
+      "x-rpc-sdk_version": MIHOYO_PROTOCOL.passport.sdkVersion,
       "User-Agent": "okhttp/4.8.0",
       Connection: "Keep-Alive",
       "Accept-Encoding": "gzip, deflate, br",
@@ -89,16 +148,19 @@ export class MihoyoClient {
 
   async requestJson(url, options = {}) {
     if (typeof this.fetch !== "function") throw new Error("fetch is unavailable")
-    const response = await this.fetch(url, options)
+    const response = await this.fetch(url, { signal: AbortSignal.timeout(20000), ...options })
     const text = await response.text()
+    const target = new URL(url)
+    const endpoint = `${target.origin}${target.pathname}`
     let data
     try {
       data = text ? JSON.parse(text.replace(/^\((.*)\)$/s, "$1")) : null
     } catch {
-      throw new Error(`invalid json response from ${url}`)
+      if (response.ok) throw new Error(`invalid json response from ${endpoint} (HTTP ${response.status})`)
     }
     if (!response.ok) {
-      const error = new Error(`http ${response.status} ${response.statusText}`)
+      const error = new Error(`http ${response.status} ${response.statusText} from ${endpoint}`)
+      error.status = response.status
       error.data = data
       throw error
     }

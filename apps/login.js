@@ -1,23 +1,28 @@
+import { refreshAccountAndSync, refreshAllAccountsAndSync, isAccountChangedError } from "../core/login/refresh.js"
 const BasePlugin = globalThis.plugin
-import { accountDisplay } from "../services/checkin/account.js"
 
 import QRCode from "qrcode"
 import { LOTUS_INTERCEPT_PRIORITY } from "../core/intercept/priority.js"
 import {
   listProfileIds,
   loadProfile,
+  ensureProfile,
+  saveProfile,
   MAX_PROFILE_ID,
   parseProfileIdFromMessage,
   PROFILE_ID_SUFFIX_PATTERN,
 } from "../core/config/profile.js"
 import { parseStokenCookie, parseAccountCookie } from "../core/mihoyo/cookies.js"
 import { AccountService } from "../core/login/account.js"
+import { ensureGeneratedProfileDevice } from "../core/devices/generated-profile.js"
 import { QrLoginService } from "../core/login/qr.js"
 import { renderStatusCard, renderTemplate } from "../core/render/service.js"
 import { isProfileCheckinEnabled } from "../core/scheduler/service.js"
 import { replyImage, replyText } from "../core/transport/reply.js"
 import { registerProfileWithGenshin } from "../services/genshinBridge/profile.js"
 import { ScheduledSigninService } from "../services/checkin/scheduled.js"
+import { loadGlobalConfig } from "../core/config/global.js"
+import { PermissionService } from "../core/permissions/service.js"
 
 const loginLocks = new Map()
 
@@ -30,11 +35,11 @@ export class LotusLogin extends BasePlugin {
       priority: LOTUS_INTERCEPT_PRIORITY,
       rule: [
         {
-          reg: "^#(扫码|二维码|辅助)(登录|绑定|登陆)$",
+          reg: `^#(扫码|二维码|辅助)(登录|绑定|登陆)${PROFILE_ID_SUFFIX_PATTERN}$`,
           fnc: "qrLogin",
         },
         {
-          reg: "^#?(米哈?游社?登(录|陆|入)|登(录|陆|入)米哈?游社?)$",
+          reg: `^#?(米哈?游社?登(录|陆|入)|登(录|陆|入)米哈?游社?)${PROFILE_ID_SUFFIX_PATTERN}$`,
           fnc: "qrLogin",
         },
         {
@@ -74,21 +79,44 @@ export class LotusLogin extends BasePlugin {
   }
 
   async qrLogin() {
-    const userId = String(this.e.user_id)
-    // 逍遥式扫码（唯一路径）：扫码确认后按账号身份（mid 优先、stuid 兜底）自动识别——
-    //   已绑定过 → 原地更新该 profile；新号 → 自动分配下一个空 profile。多次扫码即多号，无需任何编号。
-    const lockKey = `${userId}:auto`
+    const e = this.e
+    const target = { e }
+    const userId = String(e.user_id)
+    const explicit = /\d+$/.test(String(e.msg || ""))
+    const profileIdInput = parseProfileIdFromMessage(e.msg)
+    const lockKey = `${userId}:${explicit ? profileIdInput : "auto"}`
 
     if (loginLocks.has(lockKey)) {
-      await replyText(this, "[荷花插件]已有二维码等待确认，请稍后再试。")
+      await replyText(target, explicit
+        ? "[荷花插件]当前 profile 已有二维码等待确认，请稍后再试。"
+        : "[荷花插件]已有二维码等待确认，请稍后再试。")
       return true
     }
 
     loginLocks.set(lockKey, Date.now())
     try {
-      await replyText(this, "[荷花插件]正在创建米游社登录二维码，扫码确认后自动识别账号：已绑定 → 原地更新，新号 → 自动分配 profile。多次扫码即可绑定多个账号，无需带编号。")
+      let existing = null
+      let qr
+      if (explicit) {
+        await replyText(target, `[荷花插件]正在为 profile ${profileIdInput} 创建米游社登录二维码。`)
+        existing = await loadProfile(userId, profileIdInput).catch(error => {
+          if (error?.code === "ENOENT") return null
+          throw new Error("登录档案读取失败，已保留原档案，请检查后重试")
+        })
+        try {
+          if (!existing) existing = await ensureProfile({ qq: userId, profileId: profileIdInput, nickname: e.sender?.card || e.sender?.nickname || "" })
+          existing = (await ensureGeneratedProfileDevice(userId, profileIdInput)).profile
+        } catch {
+          throw new Error("登录设备档案初始化失败，已保留原档案，请检查后重试")
+        }
+        qr = new QrLoginService({ device: existing.device || {} })
+      } else {
+        // 逍遥式扫码（默认路径）：确认后按账号身份自动识别——
+        // 已绑定 → 原地更新；新号 → 自动分配下一个空 profile，无需任何编号。
+        await replyText(target, "[荷花插件]正在创建米游社登录二维码，扫码确认后自动识别账号：已绑定 → 原地更新，新号 → 自动分配 profile。多次扫码即可绑定多个账号，无需带编号。")
+        qr = new QrLoginService()
+      }
 
-      const qr = new QrLoginService()
       const created = await qr.create()
       const qrDataUrl = await QRCode.toDataURL(created.url, {
         margin: 1,
@@ -96,50 +124,74 @@ export class LotusLogin extends BasePlugin {
         errorCorrectionLevel: "M",
       })
       const image = await renderTemplate("qr-login", {
-        subtitle: "扫码后自动识别账号",
+        profileId: explicit ? profileIdInput : undefined,
+        subtitle: explicit ? undefined : "扫码后自动识别账号",
         qrDataUrl,
       }, {
-        saveId: `lotus-qr-${userId}-auto`,
+        saveId: `lotus-qr-${userId}-${explicit ? profileIdInput : "auto"}`,
       })
 
-      await replyImage(this, image, "请使用米游社 App 扫码完成登录。")
+      await replyImage(target, image, "请使用米游社 App 扫码完成登录。")
       const loginResult = await qr.waitConfirmed(created.ticket, {
         onScanned: async () => {
-          await replyText(this, "[荷花插件]二维码已扫描，请在米游社 App 内确认登录。")
+          await replyText(target, "[荷花插件]二维码已扫描，请在米游社 App 内确认登录。")
         },
       })
 
-      const accountService = new AccountService()
-      const matched = await matchProfileByAccount(userId, loginResult)
-      let profileId
-      let autoNotice
-      if (matched) {
-        profileId = matched.profileId
-        autoNotice = `已识别为已绑定账号（${matched.reason}），原地更新。`
-      } else {
-        profileId = await nextFreeProfileId(userId)
-        autoNotice = `识别为新账号，自动分配 profile ${profileId}。`
+      let profileId = profileIdInput
+      let autoNotice = ""
+      let matched = null
+      if (!explicit) {
+        matched = await matchProfileByAccount(userId, loginResult)
+        if (matched) {
+          profileId = matched.profileId
+          autoNotice = `已识别为已绑定账号（${matched.reason}），原地更新。`
+          // 老档案若缺设备，补齐后再写入，避免后续查询/签到走无设备请求。
+          try {
+            await ensureGeneratedProfileDevice(userId, profileId)
+          } catch {
+            autoNotice += "设备档案补齐失败，已沿用原设备。"
+          }
+        } else {
+          profileId = await nextFreeProfileId(userId)
+          autoNotice = `识别为新账号，自动分配 profile ${profileId}。`
+          try {
+            await ensureProfile({ qq: userId, profileId, nickname: e.sender?.card || e.sender?.nickname || "" })
+            await ensureGeneratedProfileDevice(userId, profileId)
+          } catch {
+            throw new Error("新账号设备档案初始化失败，已保留原档案，请检查后重试")
+          }
+        }
       }
 
+      const accountService = new AccountService({ client: qr.client, preserveLoginSession: true })
       let profile = await accountService.saveLoginResult({
         qq: userId,
         profileId,
         result: loginResult,
-        nickname: this.e.sender?.card || this.e.sender?.nickname || "",
+        nickname: e.sender?.card || e.sender?.nickname || "",
       })
       if (!profile.account?.cookie || profile.account?.role_sync_error) {
-        profile = await accountService.refresh(userId, profileId).catch(error => {
-          logger?.warn?.(`[Lotus-Plugin] QR login post-refresh skipped: ${error.message}`)
+        profile = await refreshAccountAndSync(userId, profileId, { accountService, expectedProfile: profile }).catch(error => {
+          if (isAccountChangedError(error)) throw error
+          globalThis.logger?.warn?.(`[Lotus-Plugin] QR login post-refresh skipped: ${error.message}`)
           return profile
         })
+      }
+      // 新扫码账号自动开启自动签到（对齐 roster 提示「扫码登录即自动加入」）。
+      // 已绑定账号原地更新：保留用户已有的 enabled 选择，不强改。
+      if (!explicit && !matched && profile.enabled !== true) {
+        profile.enabled = true
+        await saveProfile(profile)
+        autoNotice += "已自动开启自动签到（含原神/星铁/绝区零）。"
       }
       await safeRegisterGenshin(userId, profile)
       await safeAddLateSchedule(profile)
 
-      await replyText(this, `[荷花插件]profile ${profileId} 扫码登录完成，已保存登录信息。${autoNotice}`)
+      await replyText(target, `[荷花插件]profile ${profileId} 扫码登录完成，已保存登录信息。${autoNotice}`)
     } catch (error) {
-      logger?.error?.(`[Lotus-Plugin] QR login failed: ${error.stack || error.message}`)
-      await replyText(this, `[荷花插件]扫码登录失败：${error.message}`)
+      globalThis.logger?.error?.(`[Lotus-Plugin] QR login failed: ${error.stack || error.message}`)
+      await replyText(target, `[荷花插件]扫码登录失败：${error.message}`)
     } finally {
       loginLocks.delete(lockKey)
     }
@@ -153,6 +205,11 @@ export class LotusLogin extends BasePlugin {
   }
 
   async refreshCookie() {
+    const config = await loadGlobalConfig()
+    if (!new PermissionService({ permissions: config.permissions }).can(this.e, "checkin.refresh")) {
+      await replyText(this, "[荷花插件]当前不允许刷新登录信息，请联系机器人主人。")
+      return true
+    }
     const userId = String(this.e.user_id)
     const hasSuffix = /\d+$/.test(String(this.e.msg || ""))
     const profileIds = hasSuffix
@@ -165,19 +222,16 @@ export class LotusLogin extends BasePlugin {
     }
 
     const accountService = new AccountService()
-    const results = await accountService.refreshAll(userId, profileIds)
-    for (const item of results) {
-      if (item.ok) await safeRegisterGenshin(userId, item.profile)
-    }
+    const results = await refreshAllAccountsAndSync(userId, profileIds, { accountService })
     const okCount = results.filter(item => item.ok).length
     const items = results.map(item => ({
       label: `Profile ${item.profileId}`,
-      value: item.ok ? "刷新成功" : `刷新失败：${item.error?.message || "未知错误"}`,
+      value: item.ok ? "刷新成功" : `刷新失败：${friendlyRefreshError(item.error)}`,
     }))
 
     const image = await renderStatusCard({
       title: "Cookie 刷新",
-      subtitle: `${accountDisplay(String(userId))}`,
+      subtitle: `QQ ${userId}`,
       badge: `${okCount}/${results.length}`,
       message: hasSuffix
         ? `已刷新 profile ${profileIds[0]} 的登录信息。`
@@ -199,7 +253,7 @@ export class LotusLogin extends BasePlugin {
       const profile = await new AccountService().clearLogin(userId, profileId)
       const image = await renderStatusCard({
         title: "清除登录",
-        subtitle: `${accountDisplay(String(userId))} · Profile ${profileId}`,
+        subtitle: `QQ ${userId} · Profile ${profileId}`,
         badge: "完成",
         message: "已清除该 profile 的 cookie/stoken/mid 等登录敏感字段，保留设备、签到和 UID 配置。",
         userId,
@@ -227,7 +281,7 @@ export class LotusLogin extends BasePlugin {
       await safeRegisterGenshin(userId, profile)
       const image = await renderStatusCard({
         title: "同步角色",
-        subtitle: `${accountDisplay(String(userId))} · Profile ${profileId}`,
+        subtitle: `QQ ${userId} · Profile ${profileId}`,
         badge: "完成",
         message: "已通过当前 cookie 同步米哈游角色列表，并刷新 genshin bridge。",
         userId,
@@ -254,7 +308,7 @@ export class LotusLogin extends BasePlugin {
       const result = await safeRegisterGenshin(userId, profile)
       const image = await renderStatusCard({
         title: "登录桥接",
-        subtitle: `${accountDisplay(String(userId))} · Profile ${profileId}`,
+        subtitle: `QQ ${userId} · Profile ${profileId}`,
         badge: result.ok ? "完成" : "跳过",
         message: result.ok
           ? "已把该 profile 的 ltuid/cookie/uids 注册到 genshin NoteUser/MysUser。"
@@ -279,7 +333,7 @@ export class LotusLogin extends BasePlugin {
     const profiles = await new AccountService().listSummaries(userId)
     const image = await renderStatusCard({
       title: "登录列表",
-      subtitle: `${accountDisplay(String(userId))}`,
+      subtitle: `QQ ${userId}`,
       badge: String(profiles.length),
       message: profiles.length ? "当前 QQ 已创建的 profile 如下。" : "还没有创建 profile。",
       userId,
@@ -347,9 +401,25 @@ function loginRoleSummary(profile) {
   ].join(" / ")
 }
 
-// ---- 逍遥式扫码：账号身份自动识别 ----
-// 身份键：mid（米哈游通行证唯一）优先，其次 stuid，再次 ltuid，cookie 完全一致也认作同一账号。
-// 多字段兜底是为了在米游社某字段缺失/变更时仍能归并同一账号，避免回头扫同号被当成新号重复建 profile。
+// 刷新失败的展示层文案映射：把上游英文错误翻译成人话，核心抛错/retcode 保持原样。
+// 只影响 Cookie 刷新卡片显示，不改变任何刷新逻辑。
+function friendlyRefreshError(error) {
+  if (!error) return "未知错误"
+  if (error.code === "LOTUS_ACCOUNT_CHANGED") return "登录信息已变更，请重试"
+  const retcode = Number(error.retcode)
+  if (retcode === -464) return "该登录方式已被米游社停用，请重新扫码登录"
+  if (retcode === -100 || retcode === 10001) return "登录已失效，请重新扫码登录"
+  const reason = String(error.reason || "")
+  if (["request", "http"].includes(reason)) return "网络请求失败，请稍后重试"
+  if (reason === "missing_credentials") return "未保存 stoken，请重新扫码登录"
+  if (["uid_mismatch", "mid_mismatch", "credential_format"].includes(reason)) return "返回账号信息异常，请重新扫码登录"
+  return error.message || "刷新失败，请重新扫码登录"
+}
+
+// ---- 逍遥式扫码：按账号身份自动识别 profile ----
+// 身份键强度：mid > stuid > ltuid > cookie 完全一致。
+// 多字段兜底是为了在米游社某字段缺失/变更时仍能归并同一账号，
+// 避免回头扫同号被当成新号重复建 profile。
 function loginAccountIdentity(loginResult = {}) {
   const stoken = parseStokenCookie(loginResult.stoken || "")
   const cookie = parseAccountCookie(loginResult.cookie || "")
@@ -361,7 +431,7 @@ function loginAccountIdentity(loginResult = {}) {
   }
 }
 
-// cookie 比较前归一化：按 ; 切分、去空格、排序，容忍字段顺序差异，用于「cookie 完全一致」兜底匹配。
+// cookie 比较前归一化：按 ; 切分、去空格、排序，容忍字段顺序差异。
 function normalizeCookieForCompare(cookie = "") {
   return String(cookie).split(";").map(s => s.trim()).filter(Boolean).sort().join(";")
 }
@@ -375,8 +445,6 @@ async function matchProfileByAccount(userId, loginResult) {
     return null
   }
   if (ids.length === 0) return null
-  // 多字段交叉匹配（强度递减）：mid > stuid > ltuid > cookie 完全一致。
-  // 任一命中即认作同一米游社账号 → 原地更新；都不中才视为新号 → 自动编号。
   for (const id of ids) {
     try {
       const profile = await loadProfile(userId, id)
@@ -393,7 +461,7 @@ async function matchProfileByAccount(userId, loginResult) {
       if (identity.cookie && acc.cookie && normalizeCookieForCompare(identity.cookie) === normalizeCookieForCompare(acc.cookie)) {
         return { profileId: id, reason: "cookie 一致" }
       }
-    } catch { }
+    } catch {}
   }
   return null
 }
@@ -402,7 +470,7 @@ async function nextFreeProfileId(userId) {
   let ids = []
   try {
     ids = await listProfileIds(userId)
-  } catch { }
+  } catch {}
   const max = ids.reduce((m, id) => Math.max(m, Number(id) || 0), 0)
   return Math.min(MAX_PROFILE_ID, max + 1)
 }

@@ -16,6 +16,7 @@ const cache=new Map()
 export const SOURCE_CARD_TEMPLATES=Object.freeze({
  'donate':'miao/help/index.html',
  'profile-card':'genshin/html/user/uid-list.html',
+ 'daily-note-summary':'genshin/html/player/daily-note-gs.html',
  'checkin-result':'miao/character/profile-stat.html',
  'schedule-notice':'miao/help/version-info.html',
  'checkin-stats':'miao/character/profile-stat.html',
@@ -290,8 +291,43 @@ function profile(p,data){
  p.log('签到设置',data.settings||[])
  if(data.warnings?.length)p.log('提示',data.warnings)
 }
-// 体力 / 开拓力 / 电量面板已迁到 core/render/daily-note.js（ji-plugin dailyNote 版式复刻），
-// 不再走通用 source-card 构建器 —— 旧的 beige 行表版 daily() 已删除。
+// 体力便笺：保留当前 groups 数据契约与 app 行为，卡片本身改用主题真源的毛玻璃材质。
+// 只换配色/材质，不改 apps/dailyNote.js 的等待文案、单卡出图与超时逻辑。
+function primaryNote(item){
+ const d=item.data||{}
+ const pair=(a,b)=>a!==undefined?`${a}/${b??'未记录'}`:''
+ if(item.game==='gs')return{label:'原粹树脂',value:pair(d.current_resin,d.max_resin)}
+ if(item.game==='sr')return{label:'开拓力',value:pair(d.current_stamina,d.max_stamina)}
+ if(item.game==='zzz'){const e=d.energy?.progress||d.energy||{};return{label:'电量',value:pair(e.current,e.max)}}
+ return{label:item.gameName||'体力',value:''}
+}
+function daily(p,data){
+ bg(p);p.y=20
+ darkHeader(p,data.title||'体力便笺',data.subtitle,data.badge)
+ const x=UI.SIDE,w=p.width-UI.SIDE*2,labelW=w-150
+ for(const group of data.groups||[]){
+  p.rect(x,p.y+4,4,18,DARK.GOLD)
+  p.text(group.name||'',x+14,p.y+4,w-24,16,DARK.GOLD,{font:TITLE,leading:20,singleLine:true,minSize:12})
+  p.y+=30
+  for(const item of group.items||[]){
+   const primary=primaryNote(item)
+   const rows=[{label:primary.label,value:primary.value||(item.ok?'查询成功':'失败'),note:item.detail||item.error||''},
+    ...(item.details||[]).map(row=>({label:row.label,value:row.value,note:''}))]
+   const heights=rows.map(row=>Math.max(34,26+(row.note?p.lines(row.note,labelW,12).length*17:0)))
+   const top=p.y,h=12+heights.reduce((a,b)=>a+b,0)+8
+   openPanel(p,x,top,w,h,UI.R.panel||10,DARK.PANEL,2,'frost')
+   let cy=top+12
+   rows.forEach((row,i)=>{
+    p.text(row.label,x+16,cy,labelW,15,DARK.WHITE,{font:NUMBER,leading:19})
+    valueBox(p,x+w-140,cy,124,26,String(row.value??''),{size:14,align:'center'})
+    if(row.note)p.text(row.note,x+16,cy+25,labelW,12,DARK.MUTED,{leading:17})
+    cy+=heights[i]
+   })
+   p.restore();p.y=top+h+10
+  }
+ }
+ if(data.message)p.log('体力结果',[],data.message)
+}
 // 每用户签到结果卡（checkin-result）：上游 miao `.cont` 深色卡。
 // 精修：① 标题栏与其它签到卡统一（darkHeader 金字 + 右上徽标），去掉过重的 36px 白字标题；
 //      ② 浅底深字表格 → 深色行 + 语义状态胶囊（原 16 个纯文字状态变为可扫视色块）；
@@ -1156,9 +1192,9 @@ function searchResults(p,data){
 
 export async function renderSourceCard(template,data={},options={}){
  init()
- const widths={'profile-card':450,'checkin-result':600,'qr-login':620,'status':600,'schedule-notice':600,'checkin-stats':1120,'help-menu':720,'weibo-checkin':600,'achievement-index':760,'achievement-category':760,'zzz-rank':820,'douyin-info':900,'douyin-article':900,'bilibili-info':900,'atlas-result':700}
+ const widths={'profile-card':450,'daily-note-summary':480,'checkin-result':600,'qr-login':620,'status':600,'schedule-notice':600,'checkin-stats':1120,'help-menu':720,'weibo-checkin':600,'achievement-index':760,'achievement-category':760,'zzz-rank':820,'douyin-info':900,'douyin-article':900,'bilibili-info':900,'atlas-result':700}
  const p=new SourceCanvas(template==='donate'?830:widths[template]||600)
- const builders={'profile-card':profile,'checkin-result':checkin,'status':logs,'schedule-notice':logs,'checkin-stats':checkinStats,'help-menu':helpMenu,'weibo-checkin':weiboCheckin,'qr-login':qr,'achievement-index':achievements,'achievement-category':achievements,'zzz-rank':rank,'douyin-info':news,'douyin-article':news,'bilibili-info':news,'atlas-result':searchResults}
+ const builders={'profile-card':profile,'daily-note-summary':daily,'checkin-result':checkin,'status':logs,'schedule-notice':logs,'checkin-stats':checkinStats,'help-menu':helpMenu,'weibo-checkin':weiboCheckin,'qr-login':qr,'achievement-index':achievements,'achievement-category':achievements,'zzz-rank':rank,'douyin-info':news,'douyin-article':news,'bilibili-info':news,'atlas-result':searchResults}
  builders.donate=donate
  if(!builders[template])throw new Error(`No source template implementation: ${template}`)
  await builders[template](p,data,template)

@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id)
-const state = { csrf: "", profile: 1, page: 1, game: "", goods: [], plans: [], trackers: [], games: [], tab: "goods", nowOffset: 0, catalogRequest: 0 }
+const state = { csrf: "", expiresAt: 0, profile: 1, page: 1, game: "", goods: [], plans: [], trackers: [], games: [], tab: "overview", nowOffset: 0, catalogRequest: 0 }
 const states = { available: "正在兑换", scheduled: "等待开放", sold_out: "已兑完", ended: "已结束", unknown: "状态待确认" }
 const planStates = { scheduled: "等待开放", preparing: "准备兑换", submitting: "正在提交", succeeded: "兑换成功", failed: "未成功", cancelled: "已取消", missed: "已错过", unknown: "结果待确认" }
 function el(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node }
@@ -13,10 +13,11 @@ async function api(route, options = {}) {
   return data
 }
 function post(route, body) { return api(route, { method: "POST", body: JSON.stringify(body) }) }
-function showLogin(message) { state.csrf = ""; $("dashboard").hidden = true; $("login").hidden = false; if (message) $("login-message").textContent = message }
+function showLogin(message) { stopCaptchaPolling(); state.csrf = ""; $("dashboard").hidden = true; $("login").hidden = false; if (message) $("login-message").textContent = message }
 function run(fn) { return async event => { try { await fn(event) } catch (error) { toast(error.message) } } }
 function syncClock() {
   const now = Date.now() + state.nowOffset
+  if (state.csrf && state.expiresAt && now >= state.expiresAt) showLogin("浏览器令牌已到期，请私聊机器人获取新的专属登录链接。")
   $("clock").textContent = time(now)
   document.querySelectorAll("[data-deadline]").forEach(node => {
     const remaining = Math.max(0, Math.ceil((Number(node.dataset.deadline) - now) / 1000))
@@ -111,6 +112,11 @@ async function loadPlans() {
   for (const plan of data.plans) {
     const row = el("article", "plan"), copy = el("div"), actions = el("div", "plan-actions")
     copy.append(el("span", `badge ${plan.status}`, planStates[plan.status] || plan.status), el("h3", "", plan.goodsName), el("p", "", `profile ${plan.profileId} · ${plan.price} 米游币 × 1 · ${time(plan.opensAt)}（北京时间）`), el("p", "", plan.role ? `游戏角色：${plan.role.uid} · ${plan.role.region}` : `收货地址：${plan.addressLabel}`), el("p", "", plan.message))
+    if (plan.captcha?.events?.length) {
+      const captcha = el("div", "captcha-status")
+      renderCaptchaStatus(captcha, plan.captcha)
+      copy.append(captcha)
+    }
     if (["scheduled", "preparing"].includes(plan.status)) {
       const cancel = el("button", "secondary", "取消预约")
       cancel.addEventListener("click", run(async () => { await post(`plans/${plan.id}/cancel`, {}); toast("预约已取消"); await loadPlans() })); actions.append(cancel)
@@ -122,31 +128,36 @@ async function loadPlans() {
     row.append(copy, actions); $("plans").append(row)
   }
 }
-function switchTab(tab) { state.tab = tab; $("trackers-view").hidden = tab !== "trackers"; $("tab-trackers").classList.toggle("active", tab === "trackers"); $("goods-view").hidden = tab !== "goods"; $("plans-view").hidden = tab !== "plans"; $("tab-goods").classList.toggle("active", tab === "goods"); $("tab-plans").classList.toggle("active", tab === "plans") }
+function switchTab(tab) {
+  if (tab !== "overview") stopCaptchaPolling()
+  state.tab = tab
+  for (const name of ["overview", "goods", "trackers", "plans"]) { $(name + "-view").hidden = name !== tab; $("tab-" + name).classList.toggle("active", name === tab) }
+}
 async function init() {
   try {
     const ticket = new URLSearchParams(location.hash.slice(1)).get("ticket")
     if (location.hash) history.replaceState(null, "", location.pathname + location.search)
     const session = ticket ? await post("session", { ticket }) : await api("session")
-    state.csrf = session.csrf; state.nowOffset = session.now - Date.now()
+    state.csrf = session.csrf; state.expiresAt = session.expiresAt; state.nowOffset = session.now - Date.now()
+    $("session-expiry").textContent = `浏览器令牌有效至 ${time(session.expiresAt)}（北京时间）；退出将撤销当前令牌。`
     const { profiles } = await api("profiles")
     const usable = profiles.filter(profile => profile.loggedIn)
     if (!usable.length) { showLogin("尚未绑定可用账号，请先在机器人中扫码登录。"); return }
     $("profile").replaceChildren()
     for (const profile of usable) { const option = el("option", "", `profile ${profile.id} · ${profile.name}`); option.value = profile.id; $("profile").append(option) }
-    state.profile = usable[0].id; $("profile").value = state.profile
+    state.profile = usable[0]?.id || 1; $("profile").value = state.profile; $("profile").disabled = !usable.length
     $("login").hidden = true; $("dashboard").hidden = false
-    await Promise.all([loadCatalog(), loadPlans(), loadTrackers()])
+    if (usable.length) await Promise.allSettled([loadOverview(), loadCatalog(), loadPlans(), loadTrackers()])
   } catch (error) { if ($("dashboard").hidden) showLogin(error.message); else toast(error.message) }
 }
-$("profile").addEventListener("change", run(async () => { state.profile = Number($("profile").value); state.page = 1; $("detail").close(); $("tracking-detail").close(); await loadCatalog() }))
+$("profile").addEventListener("change", run(async () => { stopCaptchaPolling(); $("overview-captcha")?.replaceChildren(el("p", "muted", "正在读取当前 profile 的验证码状态…")); state.profile = Number($("profile").value); state.page = 1; $("detail").close(); $("tracking-detail").close(); await Promise.all([loadOverview(), loadCatalog()]) }))
 $("game").addEventListener("change", run(async () => { state.game = $("game").value; state.page = 1; await loadCatalog() }))
 $("status").addEventListener("change", renderGoods); $("search").addEventListener("input", renderGoods)
 $("previous").addEventListener("click", run(async () => { state.page--; await loadCatalog() }))
 $("next").addEventListener("click", run(async () => { state.page++; await loadCatalog() }))
 $("tab-goods").addEventListener("click", () => switchTab("goods")); $("tab-plans").addEventListener("click", run(async () => { switchTab("plans"); await loadPlans() }))
-$("refresh").addEventListener("click", run(async () => { await Promise.all([loadCatalog(), loadPlans(), loadTrackers()]); toast("已刷新官方数据") }))
-$("logout").addEventListener("click", run(async () => { await post("logout", {}); state.csrf = ""; showLogin("已退出。下次请私聊机器人获取新的专属登录链接。") }))
+$("refresh").addEventListener("click", run(async () => { await Promise.all([loadOverview(), loadCatalog(), loadPlans(), loadTrackers()]); toast("已刷新官方数据") }))
+$("logout").addEventListener("click", run(async () => { await post("logout", {}); state.csrf = ""; showLogin("已退出并撤销当前浏览器令牌。下次请私聊机器人获取新的专属登录链接。") }))
 $("tab-trackers").addEventListener("click", run(async () => { switchTab("trackers"); await loadTrackers() }))
 $("new-tracker").addEventListener("click", run(() => openTracking()))
 $("tracking-mode").addEventListener("change", trackingMode)
@@ -157,7 +168,7 @@ $("tracking-form").addEventListener("submit", run(async event => {
   $("tracking-submit").disabled = true
   try {
     const split = id => $(id).value.split(/[,，\n]/).map(value => value.trim()).filter(Boolean)
-    await post("trackers", { profileId: state.profile, mode: $("tracking-mode").value, game: $("tracking-game").value, itemType: Number($("tracking-type").value), goodsIds: $("tracking-mode").value === "goods" ? split("tracking-ids") : [], keywords: split("tracking-keywords"), followSameName: $("tracking-follow").checked, addressId: $("tracking-type").value === "1" ? $("tracking-target").value : "", maxPrice: $("tracking-price").value, spendLimit: $("tracking-budget").value, pollMinutes: Number($("tracking-poll").value), leadSeconds: Number($("tracking-lead").value), intervalMs: Number($("tracking-interval").value), afterSeconds: Number($("tracking-after").value) })
+    await post("trackers", { profileId: state.profile, mode: $("tracking-mode").value, game: $("tracking-game").value, itemType: Number($("tracking-type").value), goodsIds: $("tracking-mode").value === "goods" ? split("tracking-ids") : [], keywords: split("tracking-keywords"), followSameName: $("tracking-follow").checked, addressId: $("tracking-type").value === "1" ? $("tracking-target").value : "", maxPrice: $("tracking-price").value, spendLimit: $("tracking-budget").value, pollMinutes: Number($("tracking-poll").value), leadSeconds: Number($("tracking-lead").value), intervalMs: Number($("tracking-interval").value) })
     $("tracking-detail").close(); await loadTrackers(); switchTab("trackers"); toast("已开启持续追踪，成功后继续关注后续商品。")
   } finally { $("tracking-submit").disabled = false }
 }))
@@ -199,10 +210,130 @@ async function loadTrackers() {
   if (!trackers.length) { $("trackers").append(el("div", "empty", "暂无追踪规则，可添加指定商品或商品类别的持续追踪。")); return }
   for (const rule of trackers) {
     const row = el("article", "plan"), copy = el("div"), actions = el("div", "plan-actions")
-    copy.append(el("span", `badge ${rule.enabled ? "available" : "cancelled"}`, rule.enabled ? rule.status === "exchanging" ? "正在尝试兑换" : "持续追踪中" : "已暂停"), el("h3", "", rule.mode === "goods" ? rule.names.join("、") : `${state.games.find(game => game.key === rule.game)?.name || rule.game} · ${rule.itemType === 1 ? "实物周边" : "游戏道具"} · ${rule.keywords.join(" / ") || "全部"}`), el("p", "", `profile ${rule.profileId} · ${rule.role ? "UID " + rule.role.uid : rule.addressLabel} · 已兑换 ${rule.successes} 次 · 累计 ${rule.spent} 米游币${rule.spendLimit !== null ? " / 预算 " + rule.spendLimit : ""}`), el("p", "", `每 ${rule.pollMs / 60000} 分钟轮询 · 提前 ${rule.leadMs / 1000} 秒开始 · 每 ${rule.intervalMs} 毫秒尝试${rule.maxPrice !== null ? " · 单件不超过 " + rule.maxPrice + " 米游币" : ""}`), el("p", "", rule.message))
+    copy.append(el("span", `badge ${rule.enabled ? "available" : "cancelled"}`, rule.enabled ? rule.status === "exchanging" ? "正在尝试兑换" : "持续追踪中" : "已暂停"), el("h3", "", rule.mode === "goods" ? rule.names.join("、") : `${state.games.find(game => game.key === rule.game)?.name || rule.game} · ${rule.itemType === 1 ? "实物周边" : "游戏道具"} · ${rule.keywords.join(" / ") || "全部"}`), el("p", "", `profile ${rule.profileId} · ${rule.role ? "UID " + rule.role.uid : rule.addressLabel} · 已兑换 ${rule.successes} 次 · 累计 ${rule.spent} 米游币${rule.spendLimit !== null ? " / 预算 " + rule.spendLimit : ""}`), el("p", "", `每 ${rule.pollMs / 60000} 分钟轮询 · 提前 ${rule.leadMs / 1000} 秒开始 · 每 ${rule.intervalMs} 毫秒尝试 · 按官方库存与场次决定结束${rule.maxPrice !== null ? " · 单件不超过 " + rule.maxPrice + " 米游币" : ""}`), el("p", "", rule.message))
     if (rule.lastPolledAt) copy.append(el("p", "muted", "最近轮询：" + time(rule.lastPolledAt)))
     const toggle = el("button", "secondary", rule.enabled ? "暂停追踪" : "恢复追踪")
     toggle.addEventListener("click", run(async () => { await post(`trackers/${rule.id}/${rule.enabled ? "pause" : "resume"}`, {}); await loadTrackers() }))
     actions.append(toggle); row.append(copy, actions); $("trackers").append(row)
   }
 }
+
+function checkField(label, checked) {
+  const field = el("label", "option-field"), input = el("input"); input.type = "checkbox"; input.checked = Boolean(checked); field.append(input, el("span", "", label)); return { field, input }
+}
+let captchaPollTimer, captchaPollController, captchaPollGeneration = 0
+function stopCaptchaPolling() {
+  clearTimeout(captchaPollTimer)
+  captchaPollController?.abort()
+  captchaPollController = null
+  captchaPollGeneration += 1
+}
+function renderCaptchaStatus(container, data = {}) {
+  const events = Array.isArray(data.events) ? data.events : []
+  container.replaceChildren(el("h2", "", "验证码进度"))
+  container.append(el("p", "muted", data.running ? "任务执行中，验证进度会自动更新。人工验证链接也会尝试私聊发送。" : data.status === "completed" ? "本次任务已结束。" : data.status === "failed" ? "本次任务未完成，可重新尝试或联系机器人主人。" : "暂无正在处理的验证码。"))
+  const latestManual = events.map(event => event.type).lastIndexOf("captcha:manual-link")
+  const lastTerminal = Math.max(events.map(event => event.type).lastIndexOf("captcha:success"), events.map(event => event.type).lastIndexOf("captcha:fail"))
+  events.forEach((event, index) => {
+    const row = el("div", "captcha-event")
+    if (Number.isFinite(event.time)) row.append(el("small", "muted", time(event.time).slice(11)))
+    const manual = event.type === "captcha:manual-link"
+    const expires = new Date(event.expiresAt)
+    const hasDeadline = Number.isFinite(expires.getTime())
+    const current = manual && index === latestManual && index > lastTerminal && data.running
+    const expired = hasDeadline && Date.now() + state.nowOffset >= event.expiresAt
+    const deadline = current && expired ? "验证链接已过期，请返回原操作重试。" : hasDeadline
+      ? `请在北京时间 ${expires.toLocaleTimeString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })} 前完成。` : ""
+    row.append(el("p", "", manual ? `需要人工完成本次验证。${deadline}` : event.message || "验证码状态已更新。"))
+    if (current && event.link && !expired) {
+      try {
+        const url = new URL(event.link)
+        if (["https:", "http:"].includes(url.protocol)) {
+          const link = el("a", "captcha-manual-link", "打开人工验证页面")
+          link.href = url.href; link.target = "_blank"; link.rel = "noopener noreferrer"
+          row.append(link)
+        }
+      } catch {}
+    }
+    container.append(row)
+  })
+}
+function startCaptchaPolling(profile) {
+  stopCaptchaPolling()
+  const generation = captchaPollGeneration
+  const controller = new AbortController()
+  captchaPollController = controller
+  const current = () => generation === captchaPollGeneration && profile === state.profile && state.tab === "overview" && !$("dashboard").hidden
+  const poll = async () => {
+    if (!current()) return
+    try {
+      const data = await api(`miyoushe/captcha?profile=${profile}`, { signal: controller.signal })
+      if (!current()) return
+      const container = $("overview-captcha")
+      if (container) renderCaptchaStatus(container, data)
+      const button = $("miyoushe-run")
+      if (button) { button.disabled = Boolean(data.running); button.textContent = data.running ? "任务执行中" : "立即执行签到与任务" }
+      if (data.running) captchaPollTimer = setTimeout(poll, 1500)
+    } catch (error) {
+      if (!current() || controller.signal.aborted) return
+      captchaPollTimer = setTimeout(poll, 4000)
+    }
+  }
+  void poll()
+}
+
+let overviewRequest = 0
+async function loadOverview() {
+  stopCaptchaPolling()
+  const request = ++overviewRequest, profile = state.profile
+  const data = await api(`miyoushe?profile=${profile}`)
+  if (request !== overviewRequest || profile !== state.profile) return
+  const view = $("overview-view"), account = el("article", "overview-section"), missions = el("article", "overview-section")
+  account.append(el("h2", "", "账号状态"), el("p", "", `profile ${profile} · ${data.account.loggedIn ? "已登录" : "未登录"} · ${data.account.deviceBound ? "设备已绑定" : "待绑定设备"}`), el("p", "muted", data.account.roles.map(role => `${role.nickname || role.game} · ${role.uid}`).join(" / ") || "暂无绑定游戏角色"))
+  const today = data.todaySchedule || {}
+  account.append(el("p", "muted", !today.enabled ? "自动签到已关闭。" : today.time ? `今日签到安排：${today.time} · ${today.running ? "正在执行" : today.done ? today.ok ? "已完成" : "执行未成功" : "等待执行"}` : "今日签到时间尚未安排，请稍后查看。"))
+  missions.append(el("h2", "", "当前社区任务"))
+  if (data.missions) {
+    $("balance").textContent = Number(data.missions.balance).toLocaleString()
+    missions.append(el("p", "muted", `今日已领 ${data.missions.received} 米游币，剩余可领 ${data.missions.remaining}。按当前账号实际任务展示。`))
+    for (const item of data.missions.items) { const row = el("div", "mission-row"); row.append(el("span", "", item.name), el("span", item.done ? "complete" : "muted", item.done ? "已领奖" : item.automatic ? "待完成" : "请在米游社完成")); missions.append(row) }
+  } else missions.append(el("p", "muted", data.missionError || "暂时无法读取社区任务"))
+  const form = el("form", "overview-section"), settings = data.settings, fields = new Map()
+  form.append(el("h2", "", "签到与通知"))
+  const add = (key, label, value, group = form) => { const field = checkField(label, value); fields.set(key, field.input); group.append(field.field) }
+  const switches = el("div", "option-grid"); form.append(switches)
+  for (const [key, label] of [["enabled", "自动签到"], ["community", "社区任务"], ["notify", "签到结果通知"], ["osEnabled", "海外签到"]]) add(key, label, settings[key], switches)
+  for (const side of ["cn", "os"]) {
+    form.append(el("h3", "", side === "cn" ? "国内游戏签到" : "HoYoLAB 游戏签到")); const group = el("div", "option-grid"); form.append(group)
+    for (const game of data.games.filter(g => side === "cn" || g.overseas)) add(side + "." + game.key, game.name, settings[side][game.key], group)
+  }
+  form.append(el("h3", "", "社区动作")); const tasks = el("div", "option-grid"); form.append(tasks)
+  for (const [key, label] of [["checkin", "社区签到"], ["read", "阅读"], ["like", "点赞"], ["cancel_like", "点赞后取消"], ["share", "分享"]]) add("tasks." + key, label, settings.tasks[key], tasks)
+  form.append(el("p", "muted", "阅读、点赞、分享仅在官方为当前账号提供对应任务时执行。"))
+  const forums = el("div", "option-grid"); form.append(el("h3", "", "社区分区"), forums)
+  for (const [id, label] of [[1,"崩坏3"],[2,"原神"],[3,"崩坏2"],[4,"未定事件簿"],[5,"大别野"],[6,"星铁"],[8,"绝区零"],[9,"因缘精灵"],[10,"星布谷地"]]) add("forum." + id, label, settings.forums.includes(id), forums)
+  const cloud = el("div", "option-grid");form.append(el("h3", "", "云游戏"),cloud)
+  add("cloud.genshin", "云原神", settings.cloud.genshin, cloud);add("cloud.zzz", "云绝区零", settings.cloud.zzz, cloud)
+  form.append(el("p", "muted", "海外与云游戏需先通过现有聊天指令绑定各自凭证。"))
+  const redemption = settings.autoRedeem || { enabled: false, games: ["gs", "sr", "zzz"] }
+  const redeemOptions = el("div", "option-grid")
+  form.append(el("h3", "", "前瞻兑换码"), redeemOptions)
+  add("autoRedeemEnabled", "自动兑换国服前瞻码", redemption.enabled, redeemOptions)
+  for (const [id, label] of [["gs", "原神"], ["sr", "星穹铁道"], ["zzz", "绝区零"]]) add("redeem." + id, label, redemption.games.includes(id), redeemOptions)
+  form.append(el("p", "muted", "原神、星铁等 3 条码出齐再兑，绝区零等 1 条。使用当前绑定角色，结果沿用签到通知渠道。"))
+  const actions = el("div", "section-head"), save = el("button", "primary", "保存设置"), start = el("button", "secondary", data.running ? "任务执行中" : "立即执行签到与任务")
+  save.type="submit";start.type="button";start.id="miyoushe-run";start.disabled=data.running;actions.append(save,start);form.append(actions)
+  form.addEventListener("submit",run(async event => {
+    event.preventDefault();save.disabled=true
+    try { const patch={ tasks:{},cn:{},os:{},cloud:{},forums:[],autoRedeem:{games:[]} }
+      for(const [key,input] of fields){const [group,field]=key.split(".");if(group==="forum"){if(input.checked)patch.forums.push(Number(field))}else if(group==="redeem"){if(input.checked)patch.autoRedeem.games.push(field)}else if(key==="autoRedeemEnabled")patch.autoRedeem.enabled=input.checked;else if(field)patch[group][field]=input.checked;else patch[key]=input.checked}
+      await post("miyoushe/settings",{profileId:profile,settings:patch});toast("已保存，与聊天管理同步")
+    }finally{save.disabled=false}
+  }))
+  start.addEventListener("click",run(async()=>{start.disabled=true;try{await post("miyoushe/run",{profileId:profile});if(profile!==state.profile)return;start.textContent="任务执行中";toast("任务已启动，验证码进度会自动更新");if(state.tab==="overview")startCaptchaPolling(profile)}catch(error){start.disabled=false;throw error}}))
+  const captcha = el("article", "overview-section captcha-status"); captcha.id = "overview-captcha"
+  renderCaptchaStatus(captcha, data.captcha)
+  view.replaceChildren(account,missions,captcha,form)
+  if (data.running && state.tab === "overview") startCaptchaPolling(profile)
+}
+$("tab-overview").addEventListener("click",run(async()=>{switchTab("overview");await loadOverview()}))

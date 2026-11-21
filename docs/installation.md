@@ -45,11 +45,23 @@ onlyBuiltDependencies:
 
 插件首次加载时会自动生成 `config/global.yaml`。如果已经安装锅巴插件，可以直接在锅巴面板里修改荷花插件的全局配置。
 
+本地验证码的 `onnxruntime-node` 使用包内自带的 CPU 运行库，无需 CUDA。Linux x64 安装脚本可能额外下载 CUDA 组件，可在安装时设置环境变量 `ONNXRUNTIME_NODE_INSTALL=skip` 跳过，例如 `ONNXRUNTIME_NODE_INSTALL=skip pnpm install`；这不会关闭图片渲染所用的显卡。
+
 如果 clone 时没有拉子模块：
 
 ```bash
 git submodule update --init --recursive
 ```
+
+当前子模块为图鉴后端 `nanoka-atlas-backend` 与人工验证服务 `gt-manual`。启动时会补齐缺失、未初始化或提交不匹配的子模块，只同步到荷花仓库指定的提交，不追踪子模块远端最新版本。存在本地改动、冲突或同步失败时保留文件并给主人私聊通知；无变化保持静默。
+
+## 首次启动与旧版升级
+
+安装依赖并重启机器人后，默认延迟三分钟自动准备本地验证码模型、TuneWeave 和 FFmpeg；已有环境会检查完整性与最新版本，需要时修复或更新。没有变化时不发通知，日常无需手动初始化。`#初始化环境` 用于立即检查或失败后重试。完整规则与下载清单见 [初始化与自动维护](initialization.md)。
+
+从旧版升级前保存本地配置和 `data/`，通过 Git 更新源码，按宿主的 workspace 方式更新依赖并重启。账号、设备和设置会保留；外部识别服务、远程 TuneWeave 和其他外部环境由原部署方维护。签到和验证码无需 Python 或 venv。
+
+主人私聊发送 `#荷花管理面板` 获取独立配置页的限时链接；普通用户使用 `#米游社功能` 管理自己的 profile 与任务。具体入口、权限及有效期见 [网页说明](miyoushe.md)。
 
 ## 不建议同时安装
 
@@ -61,14 +73,4 @@ git submodule update --init --recursive
 - device-plugin 的全局设备注入逻辑。
 - 小花火、rconsole 等插件里的 B站解析入口。
 
-荷花插件不会直接修改这些插件的文件。插件启动时会补齐 Yunzai/TRSS 的 `config/config/group.yaml` 禁用项；验证码 handler 会替换旧的全局 handler。拦截优先级分两档（`core/intercept/priority.js`）：签到链路（体力 / 签到 / 社区签到 / 自动签到 / 登录 / 签到设置）用 `LOTUS_INTERCEPT_PRIORITY`（`-Infinity`）抢在最前；其余查询类模块（深渊 / 星铁挑战 / 面板更新 / 角色查询 / 抽卡记录 / 图鉴 / 日历素材 / 队伍伤害 / 设备绑定 / 视频解析）默认 `5001`，排在 miao / ZZZ / Atlas 的 `5000` 之后，由上游插件先接管、荷花只做后备。
-
-这一档的具体数值由 `config/global.yaml` 的 `routing` 段驱动，可以在**荧后台（锅巴）→ 荷花插件 → 命令路由**里直接改，**保存即生效**（后台会实时同步到运行中的消息处理序，无需重载插件）。
-
-```yaml
-routing:
-  query_priority: 5001   # 查询类统一优先级，越小越先接管
-  front_modules: []      # 固定抢回最前的模块 id（如 genshin_abyss / gacha_log），每行一个
-```
-
-取值优先级：环境变量 `LOTUS_QUERY_PRIORITY` > `routing.query_priority` > 内置 `5001`。
+荷花插件不会直接修改这些插件的文件。插件启动时会补齐 Yunzai/TRSS 的 `config/config/group.yaml` 禁用项，并注册更高优先级入口；验证码 handler 会替换旧的全局 handler。

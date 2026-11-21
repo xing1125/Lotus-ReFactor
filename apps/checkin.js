@@ -96,9 +96,11 @@ export class LotusCheckin extends BasePlugin {
         }).ensureEnv()
         return {
           ok: env.ok,
+          // 上游 TestNineEnvService.ensureEnv() 只返回 { ok, models, runtime, reason }，
+          // 没有 python 字段；失败时直接展示 reason，不要在 undefined 上取 command。
           value: env.ok
-            ? `${env.python.command} · 模型 ${env.models?.items?.filter(item => item.ok).length || 0}/${env.models?.items?.length || 0}`
-            : env.reason,
+            ? `${env.runtime || "本地运行时"} · 模型 ${env.models?.items?.filter(item => item.ok).length || 0}/${env.models?.items?.length || 0}`
+            : (env.reason || "验证码环境检查失败"),
         }
       }, progress))
       results.push(await runInitStep("BBDown/ffmpeg/aria2", async () => {
@@ -130,7 +132,7 @@ export class LotusCheckin extends BasePlugin {
       })
       await replyImage(this, image, ok ? "[荷花插件]签到环境初始化完成。" : "[荷花插件]签到环境部分初始化失败。")
     } catch (error) {
-      logger?.error?.(`[Lotus-Plugin] init signin env failed: ${error.stack || error.message}`)
+      globalThis.logger?.error?.(`[Lotus-Plugin] init signin env failed: ${error.stack || error.message}`)
       await replyText(this, `[荷花插件]签到环境初始化失败：${error.message}`)
     }
     return true
@@ -175,7 +177,7 @@ export class LotusCheckin extends BasePlugin {
       return true
     }
 
-    // jj 短格式：单条 @ 等待提示，随后静默执行，仅出结果图
+    // jj 短格式：群聊里先 @ 发起人一次，随后静默执行，仅出结果图
     await replyText(this, "签到中请稍后", { at: true })
 
     // 多账号时跳过每个 profile 的单卡渲染（省一次无用的渲染，最终只出合并卡）
@@ -195,7 +197,7 @@ export class LotusCheckin extends BasePlugin {
             onCaptchaEvent: async event => {
               // 过码过程不再发到群里（用户反馈刷屏）：底层照常打码，事件只进日志。
               // 最终成败由合并结果卡 / 失败文案兜底，信息不会丢。
-              if (event?.type) logger?.mark?.(`[Lotus-Plugin] checkin captcha event: ${event.type}`)
+              if (event?.type) globalThis.logger?.mark?.(`[Lotus-Plugin] checkin captcha event: ${event.type}`)
             },
           }),
           SIGNIN_DEADLINE_MS,
@@ -210,12 +212,12 @@ export class LotusCheckin extends BasePlugin {
       const image = multi
         ? await renderSigninMulti({ userId, entries })
         : runnable[0].outcome.image
-      // 开头的「签到中请稍后」已经 @ 过一次，结果卡不再重复 @（对齐体力：一次就够）
+      // 开头的「签到中请稍后」已经提示过一次，结果卡不再重复 @（对齐体力：一次就够）
       await replyImage(this, image, lastOk
-        ? `签到完成。`
+        ? "签到完成。"
         : `签到失败：${lastMessage}`)
     } catch (error) {
-      logger?.error?.(`[Lotus-Plugin] checkin failed: ${error.stack || error.message}`)
+      globalThis.logger?.error?.(`[Lotus-Plugin] checkin failed: ${error.stack || error.message}`)
       // 出失败卡本身也可能卡（渲染栈偶发挂起），卡住也必须回落纯文字，
       // 否则「签到中请稍后」之后仍然没有下文，等于白等。
       try {
@@ -234,7 +236,7 @@ export class LotusCheckin extends BasePlugin {
         }), 20000, "签到失败卡渲染")
         await replyImage(this, image, `签到失败：${error.message}`, { at: true })
       } catch (renderError) {
-        logger?.error?.(`[Lotus-Plugin] checkin failure card failed: ${renderError?.message}`)
+        globalThis.logger?.error?.(`[Lotus-Plugin] checkin failure card failed: ${renderError?.message}`)
         await replyText(this, `签到失败：${error.message}`, { at: true })
       }
     }
@@ -269,7 +271,7 @@ async function runInitStep(name, fn, onProgress = null) {
 
 function createInitProgressReporter(plugin) {
   return async message => {
-    logger?.mark?.(`[Lotus-Plugin] init signin env: ${message}`)
+    globalThis.logger?.mark?.(`[Lotus-Plugin] init signin env: ${message}`)
     await replyText(plugin, `[荷花插件]${message}`)
   }
 }
